@@ -1,10 +1,24 @@
 """
 LightRAG Prompts - Dacsa Group Edition
 
-Versión: 1.5.1 STABLE (RECOVERY FROM v1.5.0.3)
+Versión: 1.1.7 - ANTI-INFERENCE PATCH
 Fecha: 2024-12-26
 
-RECOVERY GOAL: Combinar robustez de prompt6.py + estructura de prompt.py v1.5.0.3
+CRITICAL FIX: Prevent false ownership relationships from ranking tables
+
+PROBLEMA RESUELTO:
+- ❌ v1.5.1: Ebro Foods → Parent of → Dacsa (FALSO - son competidores)
+- ❌ v1.5.1: ETG Group → Acquired → Dacsa (FALSO - ETG adquirió Industrias Racionero, NO Dacsa)
+- ✅ v1.1.7: NO inferir ownership de tablas de rankings
+
+CAMBIOS v1.1.7:
+- 🔒 Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary/acquired relationships
+- 🔒 Manejo especial de tablas de rankings (empresas listadas = competidores, NO subsidiarias)
+- 🔒 Validación de plausibilidad para relaciones críticas (ownership, acquisition, merger)
+- 🔒 Ejemplo negativo: tabla de rankings → NO extraer ownership relationships
+- ✅ Mantiene todas las features de v1.5.1 (traducciones, whitelists, blacklists, etc.)
+
+FEATURES MANTENIDAS DE v1.5.1:
 - ✅ Traducciones ES→EN offline (56 variedades + 8 productos)
 - ✅ Normalización regex por tipo de entidad
 - ✅ Detección de duplicados (similarity-based)
@@ -703,13 +717,44 @@ Your task is to extract structured information (entities and relationships) with
    - Prefer action-oriented relationships: "supplies to", "manufactures", "processes"
    - Each relationship MUST have concrete evidence in the text
 
-7. **Quality Over Quantity:**
+7. **CRITICAL ANTI-INFERENCE RULES FOR OWNERSHIP RELATIONSHIPS:**
+
+   🔒 **NEVER infer ownership/subsidiary/acquisition relationships from:**
+   - Companies appearing together in RANKING TABLES or LISTS
+   - Companies appearing in the SAME MARKET SEGMENT
+   - Companies mentioned in COMPARATIVE CONTEXTS
+   - Companies appearing in TOP 10/TOP 5 lists
+
+   ⚠️ **ONLY extract ownership relationships when the text EXPLICITLY states:**
+   - "Company A is a subsidiary of Company B"
+   - "Company B owns Company A"
+   - "Company B acquired Company A"
+   - "Company A is part of Company B Group"
+   - Direct statements with verbs: owns, acquired, purchased, merged with
+
+   ❌ **PROHIBITED INFERENCES:**
+   - ❌ "Ebro Foods and Dacsa appear in top rice companies" → NO ownership relationship
+   - ❌ "Ranking: 1. Ebro Foods, 2. Dacsa, 3. Montsiá" → These are COMPETITORS, NOT subsidiaries
+   - ❌ "ETG operates in same market as Dacsa" → NO ownership relationship
+
+   ✅ **VALID EXTRACTION EXAMPLES:**
+   - ✅ "Herba Ricemills is a subsidiary of Ebro Foods" → Extract: Herba Ricemills → subsidiary of → Ebro Foods
+   - ✅ "ETG Group acquired Industrias Racionero" → Extract: ETG Group → acquired → Industrias Racionero
+   - ✅ "Dacsa Group owns La Fallera brand" → Extract: Dacsa Group → owns → La Fallera
+
+   🎯 **RELATIONSHIP PLAUSIBILITY VALIDATION:**
+   Before extracting ownership/subsidiary/acquired relationships, verify:
+   - Is there an EXPLICIT verb indicating ownership? (owns, subsidiary of, acquired, purchased)
+   - Does the text DIRECTLY connect the two entities with ownership language?
+   - Are the entities in a TABLE/LIST context? → If YES, they are likely COMPETITORS, NOT subsidiaries
+
+8. **Quality Over Quantity:**
    - Better 5 high-quality entities than 20 generic ones
    - Maximum 10 entities and 8 relationships per chunk
    - Each entity must add strategic value
    - If in doubt, DO NOT extract
 
-8. **OUTPUT FORMAT (OFFICIAL HKUDS/LightRAG):**
+9. **OUTPUT FORMAT (OFFICIAL HKUDS/LightRAG):**
    - Use text-delimited format with <|#|> delimiter (NOT <|>)
    - Each entity: entity<|#|>entity_name<|#|>entity_type<|#|>entity_description##
    - Each relationship: relation<|#|>src_id<|#|>tgt_id<|#|>description<|#|>keywords<|#|>weight##
@@ -749,7 +794,7 @@ relation<|#|>Sueca Plant<|#|>Japonica<|#|>Processes premium rice variety<|#|>pro
 relation<|#|>Dacsa Group<|#|>HORECA Spain<|#|>Supplies rice products to distribution channel<|#|>supply,distribution,market<|#|>0.8##
 relation<|#|>Dacsa Group<|#|>EBITDA<|#|>Reports financial metric<|#|>finance,performance,metric<|#|>0.7##
 <|COMPLETE|>""",
-    
+
     """Example 2: Anti-Noise Filtering
 Input: "Ebro Foods lidera el mercado español de legumbres con garbanzos y lentejas. El algodón en India crece 15%."
 
@@ -763,6 +808,29 @@ relation<|#|>Red Lentil Flour<|#|>Pulses<|#|>Is a specific variety of<|#|>variet
 relation<|#|>Ebro Foods<|#|>Chickpea Flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
 relation<|#|>Ebro Foods<|#|>Red Lentil Flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
 <|COMPLETE|>""",
+
+    """Example 3: ANTI-INFERENCE - Ranking Tables (NO Ownership Relationships)
+Input: "Top 5 empresas arroceras españolas 2024: 1. Ebro Foods (Herba Ricemills), 2. Dacsa Group, 3. Arrocerías Pons, 4. Coop. Montsiá, 5. SOS Grupo."
+
+Output:
+entity<|#|>Ebro Foods<|#|>Company<|#|>Leading Spanish rice company, operates Herba Ricemills##
+entity<|#|>Herba Ricemills<|#|>Company<|#|>Rice processing company, subsidiary of Ebro Foods##
+entity<|#|>Dacsa Group<|#|>Company<|#|>Major Spanish rice processing company##
+entity<|#|>Arrocerías Pons<|#|>Company<|#|>Spanish rice company##
+entity<|#|>Coop. Montsiá<|#|>Company<|#|>Spanish rice cooperative##
+entity<|#|>SOS Grupo<|#|>Company<|#|>Spanish food company with rice operations##
+relation<|#|>Herba Ricemills<|#|>Ebro Foods<|#|>Is a subsidiary of (explicitly stated in parentheses)<|#|>ownership,subsidiary,corporate<|#|>1.0##
+relation<|#|>Ebro Foods<|#|>Dacsa Group<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+relation<|#|>Ebro Foods<|#|>Arrocerías Pons<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+relation<|#|>Dacsa Group<|#|>Coop. Montsiá<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+<|COMPLETE|>
+
+EXPLANATION: This is a RANKING TABLE. Companies listed together are COMPETITORS, NOT subsidiaries.
+- ❌ DO NOT extract: "Ebro Foods → owns → Dacsa Group" (WRONG - they compete)
+- ❌ DO NOT extract: "Ebro Foods → parent of → Arrocerías Pons" (WRONG - no ownership stated)
+- ✅ DO extract: "Herba Ricemills → subsidiary of → Ebro Foods" (CORRECT - explicitly stated in parentheses)
+- ✅ DO extract: Competition relationships between all companies (they are in same ranking)
+""",
 ]
 
 # ----------------------------------------------------------------------------
@@ -827,7 +895,16 @@ PROMPTS['entity_extraction_system_prompt'] = PROMPTS['entity_extraction_system_p
 # 12. VALIDACIÓN FINAL
 # ============================================================================
 
-print("✅ prompt.py v1.5.1 STABLE loaded successfully")
+print("="*80)
+print("✅ LIGHTRAG CUSTOM PROMPTS v1.1.7 LOADED SUCCESSFULLY")
+print("="*80)
+print("🆕 CAMBIOS v1.1.7 (ANTI-INFERENCE PATCH):")
+print("   - Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary")
+print("   - Manejo especial tablas de rankings (competidores, NO subsidiarias)")
+print("   - Validación plausibilidad relaciones críticas")
+print("   - Ejemplo negativo: tabla de rankings → NO ownership")
+print("")
+print("📋 FEATURES MANTENIDAS DE v1.5.1:")
 print("   - 56 variety translations + 8 product translations")
 print("   - Regex normalization by entity type")
 print("   - Duplicate detection (similarity-based)")
@@ -836,3 +913,4 @@ print("   - Aggressive blacklist anti-noise filter")
 print("   - 10 entity types (not 15)")
 print("   - Compatible with HKUDS/LightRAG official format")
 print("   - NO invented variables (v1.1.6 style examples)")
+print("="*80)
