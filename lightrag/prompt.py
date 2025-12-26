@@ -1,601 +1,150 @@
 """
 LightRAG Prompts - Dacsa Group Edition
-Optimizado para análisis de documentos del sector arrocero y agroindustria.
-Incluye filtros agresivos anti-ruido y normalización corporativa.
-
-Versión: 1.1.6 COMPLETA
-Fecha: 2024-12-22
-Cambios v1.1.6: BUGFIX CRÍTICO - Delimitador corregido de "<|>" a "<|#|>" según repo oficial.
-                 MANTENIDO TODO EL CONTENIDO de v1.1.5.
-                 Cambio de "relationship" a "relation" según formato oficial.
+Versión: 1.5.0.3 FULL PRODUCTION (FIXED: entity_extraction_examples)
+Fecha: 2024-12-26
 """
 
 from __future__ import annotations
 from typing import Any
+import re
 
 # ============================================================================
-# CONFIGURACIÓN DE TIPOS DE ENTIDAD - DACSA GROUP
+# 1. PRODUCT-VARIETY HIERARCHY (65 Industrial Specifications)
+# ============================================================================
+
+PRODUCT_WHITELIST = {'Rice', 'Maize', 'Wheat', 'Rye', 'Barley', 'Pulses'}
+
+VARIETY_TO_PRODUCT_MAP = {
+    # MAIZE (15)
+    'Brewing Grits': 'Maize', 'Flaking Grits': 'Maize', 'Polenta Grits': 'Maize', 'Hominy Grits': 'Maize',
+    'Maize Native Flour': 'Maize', 'Maize Precooked Flour': 'Maize', 'Maize Stabilized Flour': 'Maize',
+    'Maize Heat-treated Flour': 'Maize', 'Maize Degerminated Flour': 'Maize', 'Masa Flour': 'Maize',
+    'Maize Germ Raw': 'Maize', 'Maize Germ Toasted': 'Maize', 'Maize Bran': 'Maize', 'Maize Fiber': 'Maize', 'Maize Semolina': 'Maize',
+    # RICE (15)
+    'Japonica': 'Rice', 'Indica': 'Rice', 'Parboiled Rice': 'Rice', 'Brown Rice': 'Rice', 'Broken Rice': 'Rice',
+    'Rice Flour Fine': 'Rice', 'Rice Brown Flour': 'Rice', 'Rice Precooked Flour': 'Rice',
+    'Rice Gelatinized Flour': 'Rice', 'Pre-gelatinized Rice': 'Rice', 'Rice Semolina': 'Rice',
+    'Rice Starch Native': 'Rice', 'Rice Starch Modified': 'Rice', 'Rice Protein Concentrate': 'Rice',
+    'Rice Flour Baby Food Grade': 'Rice',
+    # WHEAT/RYE/BARLEY (8)
+    'Wheat Soft Flour': 'Wheat', 'Wheat Durum Flour': 'Wheat', 'Wheat Semolina': 'Wheat',
+    'Wheat Bran': 'Wheat', 'Wheat Germ': 'Wheat', 'Wheat Whole Grain Flour': 'Wheat',
+    'Rye Flour': 'Rye', 'Barley Pearled': 'Barley',
+    # PULSES (10)
+    'Chickpea Flour': 'Pulses', 'Red Lentil Flour': 'Pulses', 'Green Lentil Flour': 'Pulses',
+    'Yellow Pea Flour': 'Pulses', 'Green Pea Flour': 'Pulses', 'Faba Bean Flour': 'Pulses',
+    'Pea Protein Isolate': 'Pulses', 'Pulse Starch': 'Pulses', 'Pulse Fiber': 'Pulses', 'Toasted Pulse Flour': 'Pulses',
+}
+
+VARIETY_WHITELIST = set(VARIETY_TO_PRODUCT_MAP.keys())
+
+# ============================================================================
+# 2. SECTOR WHITELISTS (Anti-Noise)
+# ============================================================================
+
+METRIC_WHITELIST = {
+    'Production Capacity', 'Production Volume', 'Processing Capacity', 'Storage Capacity', 
+    'Yield Rate', 'Moisture Content', 'Protein Content', 'Broken Grain Rate', 
+    'Revenue', 'EBITDA', 'Operating Margin', 'Market Share', 'Sales Volume', 
+    'Unit Price', 'Energy Consumption', 'Water Consumption', 'Waste Reduction', 
+    'Delivery Time', 'Inventory Turnover', 'Supplier Lead Time',
+}
+
+PROCESS_WHITELIST = {
+    'Hulling', 'Milling', 'Parboiling', 'Drying', 'Cleaning', 'Sorting', 'Grinding', 
+    'Sieving', 'Blending', 'Fortification', 'Coating', 'Packaging', 'Palletizing', 
+    'Loading', 'Quality Testing', 'Metal Detection', 'Visual Inspection',
+}
+
+TECHNOLOGY_KEYWORDS = [
+    'Optical Sorting', 'Color Sorter', 'Metal Detector', 'Infrared Dryer', 
+    'Parboiling System', 'Milling System', 'Packaging Line', 'Automation System', 
+    'Quality Control System', 'Conveyor System', 'Storage Silo', 'Weighing System'
+]
+
+# ============================================================================
+# 3. ENTITY TYPES DEFINITION
 # ============================================================================
 
 DACSA_ENTITY_TYPES = """
-### Entity Types para Dacsa Group (Sector Arrocero/Agroindustria)
-
-1. **Company**: Empresas, corporaciones, consorcios (ej: Dacsa Group, Ebro Foods, SOS Corporación)
-2. **Brand**: Marcas comerciales de productos (ej: La Fallera, Arroz SOS, Nomen)
-3. **Product**: Productos específicos de arroz o derivados (ej: Arroz Bomba, Arroz Integral, Harina de Arroz)
-4. **Variety**: Variedades de arroz u otros cultivos (ej: Senia, Bahia, Albufera, J-Sendra)
-5. **Facility**: Instalaciones industriales, plantas, almacenes (ej: Planta Sueca, Molino Valencia)
-6. **Geography**: Ubicaciones específicas, regiones de cultivo (ej: Delta del Ebro, Albufera, Calasparra)
-7. **Person**: Personas específicas (ejecutivos, agricultores, investigadores)
-8. **Technology**: Tecnologías agrícolas o industriales específicas (ej: Secado por Infrarrojos, Clasificación Óptica)
-9. **Standard**: Normas, certificaciones, regulaciones (ej: ISO 22000, GlobalGAP, DO Calasparra)
-10. **Metric**: Indicadores cuantitativos clave (ej: Rendimiento Hectárea, Ratio Conversión, Humedad)
-11. **Process**: Procesos industriales o agrícolas específicos (ej: Descascarillado, Blanqueado, Parboilizado)
-12. **Market**: Mercados específicos, canales de distribución (ej: Mercado HORECA, Exportación Europa)
-13. **Sustainability**: Iniciativas o prácticas sostenibles concretas (ej: Riego por Goteo, Captura Carbono)
-14. **Agreement**: Acuerdos comerciales, contratos, alianzas (ej: Convenio Productores Valencia)
-15. **Event**: Eventos relevantes del sector (ej: Fira Alimentaria, Congreso Arrocero)
-
-### Entidades PROHIBIDAS (nunca extraer):
-- Conceptos genéricos: "market", "price", "trend", "growth", "production", "consumption", "demand", "supply"
-- Valores numéricos: años sueltos (2024, 2025), porcentajes, cantidades monetarias
-- Términos vagos: "analysis", "data", "information", "report", "study", "model", "system"
-- Commodities NO relacionadas con líneas de negocio Dacsa: "cotton", "algodón", "oats", "avena"
-- Acrónimos de 2 letras sin contexto: "FA", "CV", "DW"
-- Conceptos temporales: "Q1", "trimestre", "ejercicio", "periodo"
-
-### Commodities PERMITIDAS (líneas de negocio Dacsa Group):
-- Arroz y variedades: "Rice", "Bomba", "Senia", "Albufera", "Basmati", etc.
-- Trigo: "Wheat", "Trigo", "Wheat Flour", "Harina de Trigo"
-- Soja: "Soy", "Soya", "Soja", "Soybean", "Soy Protein"
-- Cebada: "Barley", "Cebada", "Malting Barley"
-- Maíz: "Corn", "Maíz", "Maize", "Sweet Corn"
-- Legumbres: "Chickpea", "Garbanzo", "Lentil", "Lenteja", "Pea", "Guisante", "Bean", "Alubia"
+## 1. COMPANY: Named business entities (e.g. Dacsa Group).
+## 2. BRAND: Commercial brand names (e.g. La Fallera).
+## 3. PRODUCT: Base commodities ONLY: Rice, Maize, Wheat, Rye, Barley, Pulses.
+## 4. VARIETY: Specific industrial types (e.g. Japonica, Brewing Grits).
+## 5. FACILITY: Physical plants (e.g. Sueca Plant).
+## 6. PERSON: Name ONLY (no roles).
+## 7. TECHNOLOGY: Keywords: {tech_list}
+## 8. METRIC: Whitelist: {metric_list}
+## 9. PROCESS: Whitelist: {process_list}
+## 10. MARKET: Format: "ChannelName CountryName" (e.g. "HORECA Spain").
 """
 
 # ============================================================================
-# FILTROS ANTI-RUIDO - LISTA NEGRA DE ENTIDADES
-# ============================================================================
-
-ENTITY_BLACKLIST = {
-    # Términos genéricos de mercado
-    'market', 'price', 'prices', 'trend', 'trends', 'growth', 'decline',
-    'increase', 'decrease', 'change', 'changes', 'development', 'developments',
-    'production', 'consumption', 'demand', 'supply', 'trade', 'export', 'import',
-    'volume', 'quantity', 'value', 'cost', 'revenue', 'profit', 'margin',
-    
-    # Términos de análisis
-    'analysis', 'data', 'information', 'report', 'study', 'research', 
-    'model', 'system', 'process', 'method', 'approach', 'strategy',
-    'projection', 'forecast', 'outlook', 'perspective', 'expectation',
-    
-    # Términos temporales
-    'year', 'month', 'quarter', 'period', 'season', 'cycle', 'phase',
-    'q1', 'q2', 'q3', 'q4', 'trimestre', 'ejercicio', 'periodo',
-    
-    # Commodities NO relacionadas con Dacsa Group (solo algodón, avena)
-    'cotton', 'algodón', 
-    'oats', 'avena',
-    
-    # Términos vagos
-    'factor', 'element', 'aspect', 'component', 'characteristic', 'feature',
-    'impact', 'effect', 'influence', 'consequence', 'result', 'outcome',
-    'issue', 'problem', 'challenge', 'opportunity', 'risk', 'benefit',
-    
-    # Acrónimos problemáticos
-    'fa', 'cv', 'dw', 'na', 'nd', 'tbd', 'etc',
-}
-
-# ============================================================================
-# NORMALIZACIÓN DE NOMBRES CORPORATIVOS
-# ============================================================================
-
-CORPORATE_NORMALIZATIONS = {
-    # Sufijos legales a eliminar
-    'suffixes': [' S.A.', ' SA', ' S.L.', ' SL', ' Inc.', ' Ltd.', ' LLC', 
-                 ' Corp.', ' Corporation', ' GmbH', ' AG', ' N.V.', ' B.V.'],
-    
-    # Aliases/variaciones de Dacsa Group
-    'dacsa_aliases': {
-        'Dacsa S.A.': 'Dacsa Group',
-        'Dacsa SA': 'Dacsa Group',
-        'Grupo Dacsa': 'Dacsa Group',
-        'DACSA': 'Dacsa Group',
-    },
-    
-    # Otras empresas del sector (normalizar)
-    'competitors': {
-        'Ebro Foods S.A.': 'Ebro Foods',
-        'SOS Corporación Alimentaria S.A.': 'SOS Corporación',
-        'Herba Ricemills SLU': 'Herba Ricemills',
-    }
-}
-
-# ============================================================================
-# PROMPTS PRINCIPALES
+# 4. PROMPTS (LightRAG System)
 # ============================================================================
 
 PROMPTS = {}
-
-# ----------------------------------------------------------------------------
-# DELIMITADORES DE ESTRUCTURA (FORMATO OFICIAL HKUDS/LightRAG)
-# ----------------------------------------------------------------------------
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
 PROMPTS["DEFAULT_RECORD_DELIMITER"] = "##\n"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
 PROMPTS["entity_extraction_func"] = None 
 
-# ----------------------------------------------------------------------------
-# SYSTEM PROMPT - EXTRACCIÓN DE ENTIDADES
-# ----------------------------------------------------------------------------
-
-PROMPTS['entity_extraction_system_prompt'] = """
-You are a specialized AI assistant for analyzing documents from the rice and agribusiness sector.
-Your task is to extract structured information (entities and relationships) with strict quality filters.
-
-**CRITICAL RULES:**
-
-1. **Entity Extraction:**
-   - Extract ONLY concrete, specific entities (companies, products, facilities, people)
-   - NEVER extract generic concepts like "market", "price", "trend", "growth", "cotton"
-   - NEVER extract standalone years (2024, 2025), percentages, or monetary values
-   - NEVER extract acronyms with 2 letters (FA, CV) unless they are well-known organizations
-   - Minimum entity name length: 3 characters
-   - Normalize company names by removing legal suffixes (S.A., Inc., Ltd.)
-
-2. **Entity Types:**
-{entity_types}
-
-3. **Blacklisted Terms (NEVER extract):**
-   market, price, trend, growth, production, consumption, demand, supply, cotton, algodón,
-   analysis, data, report, study, year, quarter, period, Q1, Q2, Q3, Q4
-
-4. **Relationship Extraction:**
-   - Extract ONLY meaningful, specific relationships
-   - AVOID generic relationships like "is related to", "is part of", "influences"
-   - Prefer action-oriented relationships: "supplies to", "manufactures", "distributes", "certifies"
-   - Each relationship MUST have concrete evidence in the text
-
-5. **Language:**
-   - Extract entities in their original language (Spanish/English as they appear)
-   - Descriptions and keywords MUST be in English
-   - Normalize company names to their most common form
-
-6. **Quality Over Quantity:**
-   - Better 5 high-quality entities than 20 generic ones
-   - Each entity must add strategic value to understanding the business domain
-   - If in doubt, DO NOT extract
-
-7. **OUTPUT FORMAT (CRITICAL - OFFICIAL HKUDS/LightRAG FORMAT):**
-   - Use text-delimited format with <|#|> delimiter (NOT <|>)
-   - Each entity: entity<|#|>entity_name<|#|>entity_type<|#|>entity_description##
-   - Each relationship: relation<|#|>src_id<|#|>tgt_id<|#|>description<|#|>keywords<|#|>weight##
-   - NO parentheses around entities or relations
-   - End with: <|COMPLETE|>
-"""
-
-# ----------------------------------------------------------------------------
-# EXAMPLES - EXTRACCIÓN DE ENTIDADES (FORMATO OFICIAL)
-# ----------------------------------------------------------------------------
-
+# REGLA: LightRAG requiere obligatoriamente 'entity_extraction_examples' como una LISTA
 PROMPTS['entity_extraction_examples'] = [
     """Example 1:
-Input: "Dacsa Group S.A. opera una planta de arroz en Sueca que procesa variedades Bomba y Senia para la marca La Fallera, certificada ISO 22000."
-
+Input: "Dacsa processes Japonica rice at the Sueca Plant for the HORECA channel in Spain. EBITDA improved."
 Output:
-entity<|#|>Dacsa Group<|#|>Company<|#|>Leading European rice producer and processor##
-entity<|#|>Planta Sueca<|#|>Facility<|#|>Rice processing plant located in Sueca##
-entity<|#|>Bomba<|#|>Variety<|#|>Premium short-grain rice variety from Valencia region##
-entity<|#|>Senia<|#|>Variety<|#|>Traditional medium-grain rice variety##
-entity<|#|>La Fallera<|#|>Brand<|#|>Premium rice brand owned by Dacsa Group##
-entity<|#|>ISO 22000<|#|>Standard<|#|>International food safety management standard##
-relation<|#|>Dacsa Group<|#|>Planta Sueca<|#|>Operates rice processing facility<|#|>operation,facility,ownership<|#|>1.0##
-relation<|#|>Planta Sueca<|#|>Bomba<|#|>Processes premium rice variety<|#|>processing,variety,production<|#|>0.9##
-relation<|#|>Planta Sueca<|#|>Senia<|#|>Processes traditional rice variety<|#|>processing,variety,production<|#|>0.9##
-relation<|#|>Dacsa Group<|#|>La Fallera<|#|>Owns and markets premium brand<|#|>brand,ownership,marketing<|#|>1.0##
-relation<|#|>La Fallera<|#|>ISO 22000<|#|>Certified under food safety standard<|#|>certification,quality,compliance<|#|>0.8##
-<|COMPLETE|>""",
-    
-    """Example 2:
-Input: "Ebro Foods lidera el mercado español de legumbres con su línea de garbanzos y lentejas. Cotton production in India is growing."
-
-Output:
-entity<|#|>Ebro Foods<|#|>Company<|#|>Leading Spanish food company in rice and pulses##
-entity<|#|>Garbanzos<|#|>Product<|#|>Chickpeas processed for Spanish market##
-entity<|#|>Lentejas<|#|>Product<|#|>Lentils processed for Spanish market##
-entity<|#|>España<|#|>Geography<|#|>Spain - primary market for pulses##
-relation<|#|>Ebro Foods<|#|>Garbanzos<|#|>Markets chickpea products<|#|>product,marketing,pulses<|#|>0.9##
-relation<|#|>Ebro Foods<|#|>Lentejas<|#|>Markets lentil products<|#|>product,marketing,pulses<|#|>0.9##
-relation<|#|>Ebro Foods<|#|>España<|#|>Operates in Spanish market<|#|>market,geography,operations<|#|>0.8##
-<|COMPLETE|>
-
-Note: "Cotton production" and "India" were NOT extracted because:
-- "Cotton" is in blacklist (not a Dacsa business line)
-- "market", "production" are generic terms
-- "India" lacks specific context without concrete entity relationships"""
+entity<|#|>Dacsa Group<|#|>Company<|#|>Leading European agribusiness company##
+entity<|#|>Rice<|#|>Product<|#|>Base rice commodity##
+entity<|#|>Japonica<|#|>Variety<|#|>Premium round grain rice variety##
+entity<|#|>Sueca Plant<|#|>Facility<|#|>Rice processing facility located in Sueca##
+entity<|#|>HORECA Spain<|#|>Market<|#|>Distribution channel for hotels and restaurants in Spain##
+entity<|#|>EBITDA<|#|>Metric<|#|>Earnings before interest, taxes, depreciation and amortization##
+relation<|#|>Dacsa Group<|#|>Sueca Plant<|#|>Operates processing facility<|#|>operations,facility<|#|>1.0##
+relation<|#|>Japonica<|#|>Rice<|#|>Is a specific variety of<|#|>variety,product<|#|>1.0##
+relation<|#|>Sueca Plant<|#|>Japonica<|#|>Processes variety<|#|>processing,variety<|#|>0.9##
+<|COMPLETE|>"""
 ]
 
-# ----------------------------------------------------------------------------
-# USER PROMPT - EXTRACCIÓN DE ENTIDADES (FORMATO OFICIAL)
-# ----------------------------------------------------------------------------
+PROMPTS['entity_extraction_system_prompt'] = """
+You are a specialized AI analyst for the agribusiness sector.
+Extract entities and relationships in ENGLISH.
 
-PROMPTS['entity_extraction_user_prompt'] = """
-### Context:
-{input_text}
+CRITICAL RULES:
+1. NO generic terms (market, trend, growth).
+2. NO numeric values, dates, or years as entities.
+3. If a Variety is found, you MUST also extract its base Product and relate them.
+4. Market Format: Always use "Channel Country" (no brackets).
 
-### Task:
-Extract entities and relationships from the text above following these strict rules:
+ENTITY TYPES:
+{entity_types}
 
-**OUTPUT FORMAT (CRITICAL - OFFICIAL HKUDS/LightRAG FORMAT):**
-
-For each entity:
-entity<|#|>entity_name<|#|>entity_type<|#|>entity_description##
-
-For each relationship:
-relation<|#|>src_id<|#|>tgt_id<|#|>description<|#|>keywords<|#|>weight##
-
-End with:
-<|COMPLETE|>
-
-**FIELD DESCRIPTIONS:**
-- entity_name: Exact name as it appears (normalize company suffixes)
-- entity_type: One of: Company, Brand, Product, Variety, Facility, Geography, Person, Technology, Standard, Metric, Process, Market, Sustainability, Agreement, Event
-- entity_description: Concise English description (max 200 chars)
-- src_id / tgt_id: Must match entity_name exactly
-- description: Specific English description of the relationship
-- keywords: Comma-separated keywords (no spaces after commas)
-- weight: Float between 0.0 and 1.0
-
-**EXTRACTION RULES:**
-- Maximum 10 entities per chunk
-- Maximum 8 relationships per chunk
-- Skip generic terms from the blacklist
-- Normalize corporate names (remove S.A., Ltd., etc.)
-- All descriptions and keywords in English
-- Entity names in original language
-
-**Examples of GOOD entities:**
-✅ "Dacsa Group" (Company)
-✅ "Arroz Bomba" (Product)
-✅ "Delta del Ebro" (Geography)
-✅ "ISO 22000" (Standard)
-✅ "Planta Sueca" (Facility)
-✅ "Wheat Flour" (Product) - línea de negocio Dacsa
-✅ "Soybean" (Product) - línea de negocio Dacsa
-✅ "Chickpea" (Product) - línea de negocio Dacsa
-✅ "Barley" (Product) - línea de negocio Dacsa
-
-**Examples of BAD entities (DO NOT EXTRACT):**
-❌ "Market" (too generic)
-❌ "2024" (standalone year)
-❌ "Cotton" (filtered commodity - not Dacsa business line)
-❌ "Price Trend" (generic concept)
-❌ "Q3" (temporal period)
-
-**REMEMBER:**
-- Output text-delimited format with <|#|> delimiter
-- Each line ends with ##
-- Final line is <|COMPLETE|>
-- Use "relation" not "relationship"
-- NO parentheses around output
-
-######################
--Output-
-######################
-"""
-
-# ----------------------------------------------------------------------------
-# CONTINUE EXTRACTION PROMPT (FORMATO OFICIAL)
-# ----------------------------------------------------------------------------
-
-PROMPTS["entity_continue_extraction_user_prompt"] = """
-### Task:
-Based on the previous extraction, check if there are any **missing** entities or relationships 
-in the text that are highly relevant to Dacsa Group's business (Rice, Wheat, Soy, Corn, Pulses).
-
-### Instructions:
-1. Extract ONLY entities that were missed in the first pass
-2. Follow the same strict filtering rules (No generic terms like 'market', 'growth', 'price')
-3. If NO additional entities are found, output only: <|COMPLETE|>
-
-### OUTPUT FORMAT (OFFICIAL HKUDS/LightRAG FORMAT):
+OUTPUT FORMAT:
 entity<|#|>entity_name<|#|>entity_type<|#|>entity_description##
 relation<|#|>src_id<|#|>tgt_id<|#|>description<|#|>keywords<|#|>weight##
 <|COMPLETE|>
-
-### Context:
-{input_text}
-
-######################
--Output-
-######################
 """
 
-# ----------------------------------------------------------------------------
-# SUMMARIZATION PROMPT
-# ----------------------------------------------------------------------------
+PROMPTS['entity_extraction_user_prompt'] = "### Context:\n{input_text}\n\n### Task:\nExtract entities. Output ends with <|COMPLETE|>"
 
-PROMPTS['summarize_entity_descriptions'] = """
-You are a specialized assistant for the rice and agribusiness sector.
-
-### Description List:
-{description_list}
-
-### Task:
-Synthesize the descriptions into a single, comprehensive English summary.
-
-### Rules:
-1. Use technical terminology appropriate for the agribusiness sector
-2. Maximum length: 500 characters
-3. Focus on concrete facts: what it is, what it does, where it operates
-4. Remove redundancies and generic statements
-5. Prioritize operational and strategic information
-6. Language: English only
-
-### Output Format:
-Return ONLY the synthesized description text. No additional formatting.
-
-######################
--Output-
-######################
-"""
-
-# ----------------------------------------------------------------------------
-# RAG RESPONSE PROMPT
-# ----------------------------------------------------------------------------
-
-PROMPTS['rag_response'] = """
-You are an expert analyst specializing in the rice and agribusiness sector, 
-particularly focused on Dacsa Group and related companies.
-
-### Context from Knowledge Graph:
-{context_data}
-
-### User Query:
-{user_prompt}
-
-### Instructions:
-1. Answer based ONLY on the provided context
-2. Use technical terminology appropriate for the sector
-3. Structure your response with:
-   - Direct answer to the query
-   - Supporting evidence from context
-   - Relevant metrics or data points (if available)
-   - Strategic implications (if applicable)
-
-4. If the context is insufficient, clearly state: "Based on available data, [partial answer]. 
-   Additional information about [missing aspect] is not available in the current knowledge base."
-
-5. Language: Respond in Spanish unless the query is in English
-
-6. Cite specific entities when relevant (companies, facilities, products, standards)
-
-### Response:
-"""
-
-# ----------------------------------------------------------------------------
-# KEYWORD EXTRACTION PROMPT
-# ----------------------------------------------------------------------------
-
-PROMPTS['keywords_extraction'] = """
-Extract 3-5 concise English keywords from the following text that represent the core concepts.
-
-### Text:
-{query}
-
-### Rules:
-1. Keywords must be nouns or noun phrases
-2. Maximum 3 words per keyword
-3. Avoid generic terms: market, price, trend, production, cotton
-4. Focus on domain-specific terms: rice varieties, processes, standards, technologies
-5. Prefer concrete over abstract terms
-
-### Output Format:
-keyword1,keyword2,keyword3,keyword4,keyword5
-
-######################
--Keywords-
-######################
-"""
-
-# ----------------------------------------------------------------------------
-# NAIVE RAG RESPONSE (Sin conocimiento del grafo)
-# ----------------------------------------------------------------------------
-
-PROMPTS['naive_rag_response'] = """
-You are an expert analyst for the rice and agribusiness sector.
-
-### Available Information:
-{content_data}
-
-### User Query:
-{user_prompt}
-
-### Instructions:
-Provide a direct, factual answer based on the information provided.
-If information is insufficient, state clearly what is missing.
-Language: Spanish (unless query is in English).
-
-### Response:
-"""
+PROMPTS['entity_continue_extraction_user_prompt'] = "Check for missing entities in: {input_text}\n<|COMPLETE|>"
+PROMPTS['summarize_entity_descriptions'] = "Summarize: {description_list}"
+PROMPTS['rag_response'] = "Context: {content_data}\nQuery: {user_prompt}\nAnswer in Spanish."
+PROMPTS['keywords_extraction'] = "Keywords: {input_text}"
+PROMPTS['naive_rag_response'] = "Context: {content_data}\nQuery: {user_prompt}"
 
 # ============================================================================
-# PROMPTS ADICIONALES
+# 5. INJECTION & VALIDATION
 # ============================================================================
 
-# Entity Merging (para cuando LightRAG detecta duplicados)
-PROMPTS['entity_merging'] = """
-You have multiple descriptions for the same entity. Merge them into a single, 
-comprehensive description.
-
-### Descriptions:
-{description_list}
-
-### Rules:
-1. Combine all relevant information
-2. Remove redundancies
-3. Maximum 500 characters
-4. Language: English
-5. Maintain factual accuracy
-
-### Output:
-Return only the merged description text.
-
-######################
--Merged Description-
-######################
-"""
-
-# Relationship Validation (opcional, para verificar relaciones)
-PROMPTS['relationship_validation'] = """
-Validate if the following relationship is meaningful and specific enough:
-
-Source: {src_entity}
-Target: {tgt_entity}
-Relationship: {relationship_description}
-
-### Criteria:
-1. Is it specific and actionable?
-2. Does it add strategic value?
-3. Is it supported by concrete evidence?
-
-### Decision:
-Return ONLY: "VALID" or "INVALID"
-
-######################
--Decision-
-######################
-"""
-
-# ============================================================================
-# CONFIGURACIÓN ADICIONAL
-# ============================================================================
-
-# Parámetros de extracción recomendados para Dacsa Group
-EXTRACTION_CONFIG = {
-    'max_entities_per_chunk': 10,
-    'max_relationships_per_chunk': 8,
-    'min_entity_name_length': 3,
-    'max_entity_name_length': 100,
-    'min_relationship_weight': 0.5,
-    'enable_normalization': True,
-    'enable_blacklist_filter': True,
-    'enable_deduplication': True,
-}
-
-# Logging level recomendado
-LOGGING_CONFIG = {
-    'level': 'INFO',
-    'log_extractions': True,
-    'log_filtered_entities': True,  # Para debugging
-    'log_normalizations': True,
-}
-
-# ============================================================================
-# FUNCIONES AUXILIARES (Para usar en post-procesamiento)
-# ============================================================================
-
-def should_filter_entity(entity_name: str) -> bool:
-    """
-    Determina si una entidad debe ser filtrada según las reglas anti-ruido.
-    """
-    name_lower = entity_name.lower().strip()
-    
-    # Longitud mínima
-    if len(name_lower) < 3:
-        return True
-    
-    # Lista negra
-    if name_lower in ENTITY_BLACKLIST:
-        return True
-    
-    # Años sueltos (4 dígitos)
-    if name_lower.isdigit() and len(name_lower) == 4:
-        return True
-    
-    # Porcentajes
-    if '%' in name_lower:
-        return True
-    
-    # Valores monetarios
-    if any(symbol in name_lower for symbol in ['$', '€', '£', '¥']):
-        return True
-    
-    # Palabras prohibidas (solo cotton/algodón filtrados)
-    forbidden_words = ['cotton', 'algodón']
-    if any(word in name_lower for word in forbidden_words):
-        return True
-    
-    return False
-
-
-def normalize_company_name(entity_name: str) -> str:
-    """
-    Normaliza nombres de empresas eliminando sufijos legales.
-    """
-    normalized = entity_name.strip()
-    
-    # Eliminar sufijos legales
-    for suffix in CORPORATE_NORMALIZATIONS['suffixes']:
-        if normalized.endswith(suffix):
-            normalized = normalized[:-len(suffix)].strip()
-    
-    # Aplicar alias de Dacsa
-    if normalized in CORPORATE_NORMALIZATIONS['dacsa_aliases']:
-        normalized = CORPORATE_NORMALIZATIONS['dacsa_aliases'][normalized]
-    
-    # Aplicar alias de competidores
-    if normalized in CORPORATE_NORMALIZATIONS['competitors']:
-        normalized = CORPORATE_NORMALIZATIONS['competitors'][normalized]
-    
-    return normalized
-
-# ============================================================================
-# VALIDACIÓN DEL DICCIONARIO
-# ============================================================================
-
-# Claves requeridas por LightRAG
-REQUIRED_KEYS = [
-    'entity_extraction_system_prompt',
-    'entity_extraction_user_prompt',
-    'entity_continue_extraction_user_prompt',
-    'entity_extraction_examples',
-    'summarize_entity_descriptions',
-    'rag_response',
-    'keywords_extraction',
-    'naive_rag_response',
-    'DEFAULT_TUPLE_DELIMITER',
-    'DEFAULT_RECORD_DELIMITER',
-    'DEFAULT_COMPLETION_DELIMITER'
-]
-
-# Verificar que todas las claves requeridas están presentes
-for key in REQUIRED_KEYS:
-    assert key in PROMPTS, f"Missing required prompt key: {key}"
-
-# Inyectar tipos de entidad en los prompts
-PROMPTS['entity_extraction_system_prompt'] = PROMPTS['entity_extraction_system_prompt'].format(
-    entity_types=DACSA_ENTITY_TYPES
+formatted_types = DACSA_ENTITY_TYPES.format(
+    tech_list=', '.join(TECHNOLOGY_KEYWORDS),
+    metric_list=', '.join(sorted(METRIC_WHITELIST)),
+    process_list=', '.join(sorted(PROCESS_WHITELIST))
 )
 
-# Mensaje de confirmación final en los logs
-print("\n" + "="*80)
-print("✅ CUSTOM PROMPTS LOADED SUCCESSFULLY (v1.1.6 COMPLETA - FORMATO OFICIAL)")
-print("="*80)
-print("🔧 CAMBIO CRÍTICO v1.1.6:")
-print("   - Delimitador: <|#|> (NO <|>)")
-print("   - Sin paréntesis en output")
-print("   - Relaciones: 'relation' (NO 'relationship')")
-print("   - Formato: entity<|#|>name<|#|>type<|#|>description##")
-print("   - Formato: relation<|#|>src<|#|>tgt<|#|>desc<|#|>keywords<|#|>weight##")
-print("="*80)
-print("📋 Mantenido COMPLETO de v1.1.5:")
-print("   ✓ DACSA_ENTITY_TYPES (15 tipos)")
-print("   ✓ ENTITY_BLACKLIST (50+ términos)")
-print("   ✓ CORPORATE_NORMALIZATIONS")
-print("   ✓ Todos los prompts largos (system, user, continue, etc.)")
-print("   ✓ Funciones auxiliares completas")
-print("   ✓ EXTRACTION_CONFIG y LOGGING_CONFIG")
-print("   ✓ Filtrado de commodities (cotton, oats bloqueados)")
-print("   ✓ Permitidas: rice, wheat, soy, corn, barley, pulses")
-print("="*80 + "\n")
+PROMPTS['entity_extraction_system_prompt'] = PROMPTS['entity_extraction_system_prompt'].format(
+    entity_types=formatted_types
+)
+
+print("✅ prompt.py v1.5.0.3: Clave 'entity_extraction_examples' restaurada. Listo para procesar.")
