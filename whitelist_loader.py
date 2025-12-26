@@ -252,6 +252,130 @@ class WhitelistLoader:
         self.config = self._load_config()
         print("✅ Whitelists recargadas desde archivos YAML")
 
+    def validate_entity(self, entity_name: str, entity_type: str) -> tuple[bool, str]:
+        """
+        Valida si una entidad está en la whitelist correspondiente.
+
+        Args:
+            entity_name: Nombre de la entidad a validar
+            entity_type: Tipo de entidad (variety, product, etc.)
+
+        Returns:
+            Tuple (is_valid: bool, normalized_name: str)
+            - is_valid: True si está en whitelist o no hay whitelist para este tipo
+            - normalized_name: Nombre normalizado según whitelist
+
+        Examples:
+            >>> loader.validate_entity('RICE', 'product')
+            (True, 'rice')
+            >>> loader.validate_entity('LARGO', 'variety')
+            (True, 'largo')
+        """
+        normalized = self._normalize(entity_name)
+
+        # Map entity types to getter methods
+        type_to_getter = {
+            'variety': self.get_varieties,
+            'product': self.get_products,
+            'brand': self.get_brands,
+            'company': self.get_companies,
+            'facility': self.get_facilities,
+            'country': self.get_countries,
+            'region': self.get_regions,
+            'market': self.get_markets,
+            'metric': self.get_metrics,
+            'standard': self.get_standards,
+        }
+
+        # If no whitelist for this type, consider valid
+        if entity_type.lower() not in type_to_getter:
+            return True, entity_name
+
+        # Get whitelist for this entity type
+        whitelist = type_to_getter[entity_type.lower()]()
+
+        # Check if normalized name is in whitelist
+        if normalized in whitelist:
+            return True, normalized
+
+        return False, normalized
+
+    def get_canonical_name(self, entity_name: str, entity_type: str) -> str:
+        """
+        Obtiene el nombre canónico de una entidad desde la whitelist.
+        Resuelve variaciones como Rice/rice/RICE → rice
+
+        Args:
+            entity_name: Nombre de la entidad
+            entity_type: Tipo de entidad
+
+        Returns:
+            Nombre canónico normalizado
+        """
+        is_valid, normalized = self.validate_entity(entity_name, entity_type)
+        return normalized
+
+
+# ============================================================================
+# FACILITY NAME CLEANING
+# ============================================================================
+
+def clean_facility_name(facility_name: str) -> str:
+    """
+    Limpia nombres de facilities eliminando apelativos como Mill, Plant, Production, etc.
+    Solo retorna el nombre de la localidad.
+
+    Args:
+        facility_name: Nombre completo de la facility
+
+    Returns:
+        Nombre limpio (solo localidad)
+
+    Examples:
+        >>> clean_facility_name('Valencia Mill')
+        'Valencia'
+        >>> clean_facility_name('Sueca Plant')
+        'Sueca'
+        >>> clean_facility_name('Production Facility in Sevilla')
+        'Sevilla'
+    """
+    import re
+
+    # Lista de apelativos a eliminar
+    descriptors = [
+        r'\b(mill|mills)\b',
+        r'\b(plant|plants)\b',
+        r'\b(facility|facilities)\b',
+        r'\b(factory|factories)\b',
+        r'\b(production|processing)\b',
+        r'\b(warehouse|storage)\b',
+        r'\b(headquarters|hq)\b',
+        r'\b(site|sites)\b',
+        r'\b(center|centre)\b',
+        r'\b(complex)\b',
+        r'\b(unit|units)\b',
+    ]
+
+    # Eliminar frases preposicionales
+    name = re.sub(r'\bin\b\s+', '', facility_name, flags=re.IGNORECASE)
+    name = re.sub(r'\bat\b\s+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bof\b\s+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\ben\b\s+', '', name, flags=re.IGNORECASE)
+    name = re.sub(r'\bde\b\s+', '', name, flags=re.IGNORECASE)
+
+    # Eliminar descriptores
+    for descriptor in descriptors:
+        name = re.sub(descriptor, '', name, flags=re.IGNORECASE)
+
+    # Limpiar espacios múltiples y trim
+    name = re.sub(r'\s+', ' ', name).strip()
+
+    # Si quedó vacío, retornar original
+    if not name:
+        return facility_name
+
+    return name
+
 
 # ============================================================================
 # REGEX PATTERNS PARA EXTRACCIÓN AVANZADA

@@ -50,11 +50,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 try:
-    from whitelist_loader import WhitelistLoader, EntityPatterns
+    from whitelist_loader import WhitelistLoader, EntityPatterns, clean_facility_name
     WHITELIST_LOADER_AVAILABLE = True
 except ImportError:
     WHITELIST_LOADER_AVAILABLE = False
     print("⚠️  WhitelistLoader not available, using hardcoded whitelists")
+
+    # Fallback clean_facility_name if loader not available
+    def clean_facility_name(name: str) -> str:
+        return name
 
 # ============================================================================
 # 1. DICCIONARIOS DE TRADUCCIÓN ES→EN (v1.5.0 - 56 varieties + 8 products)
@@ -192,7 +196,8 @@ else:
 # 2. PRODUCT-VARIETY HIERARCHY (65 Industrial Specifications)
 # ============================================================================
 
-PRODUCT_WHITELIST = {'Rice', 'Maize', 'Wheat', 'Rye', 'Barley', 'Pulses'}
+# PRODUCT_WHITELIST: lowercase for case-insensitive matching
+PRODUCT_WHITELIST = {'rice', 'maize', 'wheat', 'rye', 'barley', 'pulses'}
 
 VARIETY_TO_PRODUCT_MAP = {
     # MAIZE (15)
@@ -436,13 +441,13 @@ def normalize_company_name(entity_name: str) -> str:
     """
     Normalización específica para nombres corporativos.
     Elimina sufijos legales y aplica aliases.
-    
+
     Args:
         entity_name: Nombre de la empresa
-    
+
     Returns:
         Nombre normalizado
-    
+
     Examples:
         >>> normalize_company_name('EBRO FOODS S.A.')
         'Ebro Foods'
@@ -450,14 +455,14 @@ def normalize_company_name(entity_name: str) -> str:
         'Dacsa Group'
     """
     normalized = entity_name.strip()
-    
+
     # Eliminar sufijos legales
-    suffixes = [' S.A.', ' SA', ' S.L.', ' SL', ' Inc.', ' Ltd.', ' LLC', 
+    suffixes = [' S.A.', ' SA', ' S.L.', ' SL', ' Inc.', ' Ltd.', ' LLC',
                 ' Corp.', ' Corporation', ' GmbH', ' AG', ' N.V.', ' B.V.']
     for suffix in suffixes:
         if normalized.upper().endswith(suffix.upper()):
             normalized = normalized[:-len(suffix)].strip()
-    
+
     # Aplicar aliases de Dacsa
     dacsa_aliases = {
         'Dacsa S.A.': 'Dacsa Group',
@@ -465,14 +470,94 @@ def normalize_company_name(entity_name: str) -> str:
         'Grupo Dacsa': 'Dacsa Group',
         'DACSA': 'Dacsa Group',
     }
-    
+
     if normalized in dacsa_aliases:
         normalized = dacsa_aliases[normalized]
-    
+
     # Title Case final
     normalized = normalized.title()
-    
+
     return normalized
+
+
+# ============================================================================
+# 6.5. WHITELIST VALIDATION AND NORMALIZATION (v1.5.0)
+# ============================================================================
+
+def validate_and_normalize_entity(entity_name: str, entity_type: str) -> tuple[bool, str]:
+    """
+    Valida una entidad contra la whitelist YAML y retorna versión normalizada.
+
+    CRITICAL: Esta función debe ser llamada ANTES de insertar entidades al grafo
+    para evitar duplicados por case (Rice/rice, LARGO/largo).
+
+    Args:
+        entity_name: Nombre de la entidad extraída
+        entity_type: Tipo de entidad (Product, Variety, Brand, etc.)
+
+    Returns:
+        Tuple (is_valid: bool, normalized_name: str)
+        - is_valid: True si pasa validación (está en whitelist o no hay whitelist para el tipo)
+        - normalized_name: Nombre canónico normalizado
+
+    Examples:
+        >>> validate_and_normalize_entity('RICE', 'Product')
+        (True, 'rice')
+        >>> validate_and_normalize_entity('Japonica', 'Variety')
+        (True, 'japonica')
+        >>> validate_and_normalize_entity('Valencia Mill', 'Facility')
+        (True, 'Valencia')
+        >>> validate_and_normalize_entity('FakeProduct', 'Product')
+        (False, 'fakeproduct')
+
+    Casos Especiales:
+        - FACILITY: Limpia apelativos (Mill, Plant, etc.) → solo localidad
+        - PRODUCT/VARIETY: Normaliza a lowercase y valida contra whitelist
+        - PERSON: Siempre retorna (False, ...) porque está desactivada
+    """
+    # PERSON está desactivada - rechazar siempre
+    if entity_type.lower() == 'person':
+        return False, entity_name.lower()
+
+    # FACILITY: Limpiar apelativos antes de validar
+    if entity_type.lower() == 'facility':
+        cleaned = clean_facility_name(entity_name)
+        if WHITELIST_LOADER_AVAILABLE and loader:
+            return loader.validate_entity(cleaned, 'facility')
+        return True, cleaned
+
+    # Usar whitelist loader si está disponible
+    if WHITELIST_LOADER_AVAILABLE and loader:
+        is_valid, normalized = loader.validate_entity(entity_name, entity_type.lower())
+        return is_valid, normalized
+
+    # Fallback: normalizar manualmente
+    normalized = normalize_entity_name(entity_name, entity_type)
+    return True, normalized
+
+
+def get_entity_canonical_name(entity_name: str, entity_type: str) -> str:
+    """
+    Obtiene el nombre canónico de una entidad (versión de whitelist).
+
+    Esta función DEBE ser usada al insertar entidades en el grafo
+    para garantizar consistencia.
+
+    Args:
+        entity_name: Nombre extraído
+        entity_type: Tipo de entidad
+
+    Returns:
+        Nombre canónico (normalizado y validado)
+
+    Examples:
+        >>> get_entity_canonical_name('RICE', 'Product')
+        'rice'
+        >>> get_entity_canonical_name('Sueca Plant', 'Facility')
+        'Sueca'
+    """
+    is_valid, canonical = validate_and_normalize_entity(entity_name, entity_type)
+    return canonical
 
 
 # ============================================================================
@@ -738,10 +823,12 @@ Your task is to extract structured information (entities and relationships) with
 
 **CRITICAL RULES:**
 
-1. **Language:**
+1. **Language & Case Normalization:**
    - ALL entity names MUST be in ENGLISH (translate from Spanish if needed)
+   - ALL entity names MUST be in **lowercase** (rice, not Rice or RICE)
    - Use offline translation dictionaries provided
    - Descriptions and keywords in English
+   - **CRITICAL**: Normalize ALL entities to lowercase to prevent duplicates
 
 2. **Entity Extraction:**
    - Extract ONLY concrete, specific entities (companies, products, facilities, people)
@@ -750,6 +837,9 @@ Your task is to extract structured information (entities and relationships) with
    - NEVER extract acronyms < 3 letters unless well-known organizations
    - Minimum entity name length: 3 characters
    - Normalize company names by removing legal suffixes (S.A., Inc., Ltd.)
+   - **FACILITY NAMES**: Extract ONLY the location name, NO descriptors (Mill, Plant, Production, etc.)
+     - ✅ Correct: "Valencia" or "Sueca"
+     - ❌ Wrong: "Valencia Mill", "Sueca Plant", "Production Facility in Sevilla"
 
 3. **Entity Types:**
 {entity_types}
@@ -758,11 +848,14 @@ Your task is to extract structured information (entities and relationships) with
    market, price, trend, growth, production, consumption, demand, supply, cotton,
    analysis, data, report, study, year, quarter, period, Q1, Q2, Q3, Q4
 
-5. **Product-Variety Hierarchy:**
-   - PRODUCT whitelist: Rice, Maize, Wheat, Rye, Barley, Pulses
-   - VARIETY whitelist: 65 industrial specifications (see Entity Types)
+5. **Product-Variety Hierarchy & STRICT Whitelist Enforcement:**
+   - PRODUCT whitelist: rice, maize, wheat, rye, barley, pulses (ONLY these 6, in lowercase)
+   - VARIETY whitelist: 72 industrial specifications loaded from YAML (see Entity Types)
+   - **CRITICAL**: Extract ONLY products/varieties that exist in whitelist
+   - **CRITICAL**: ALL products/varieties MUST be in lowercase (rice, not Rice)
    - RULE: When extracting a Variety → also extract its base Product
    - Create relationship: Variety → Product ("is a specific variety of")
+   - ❌ REJECT any product/variety NOT in whitelist (e.g., "cotton", "sugar", "coffee")
 
 6. **Relationship Extraction:**
    - Extract ONLY meaningful, specific relationships
@@ -816,14 +909,17 @@ Your task is to extract structured information (entities and relationships) with
 
 **Validation Checklist Before Output:**
 □ All entity names in ENGLISH (no Spanish)
-□ All Products from whitelist (Rice/Maize/Wheat/Rye/Barley/Pulses)
-□ All Varieties from 65 industrial specifications
+□ **ALL entity names in lowercase** (rice, not Rice or RICE)
+□ All Products from whitelist (rice, maize, wheat, rye, barley, pulses) - lowercase only
+□ All Varieties from 72 YAML whitelist specifications - lowercase only
 □ All Metrics from 20 KPIs whitelist
 □ All Processes from 17 operations whitelist
 □ Market format: "Channel Country" (not channel alone or country alone)
+□ **Facility names: location ONLY** (Valencia, not "Valencia Mill")
 □ No blacklisted terms (market, price, trend, etc.)
 □ No numeric values, years, or percentages as entities
 □ Company names normalized (S.A., Inc., Ltd. removed)
+□ **No PERSON entities** (entity type disabled)
 """
 
 # ----------------------------------------------------------------------------
@@ -831,58 +927,65 @@ Your task is to extract structured information (entities and relationships) with
 # ----------------------------------------------------------------------------
 
 PROMPTS['entity_extraction_examples'] = [
-    """Example 1: Variety Hierarchy + Translation ES→EN
+    """Example 1: Variety Hierarchy + Translation ES→EN + Lowercase Normalization
 Input: "Dacsa procesa arroz japónica en la planta de Sueca para el canal HORECA en España. El EBITDA mejoró."
 
 Output:
-entity<|#|>Dacsa Group<|#|>Company<|#|>Leading European agribusiness company specializing in rice processing##
-entity<|#|>Rice<|#|>Product<|#|>Base rice commodity##
-entity<|#|>Japonica<|#|>Variety<|#|>Premium round grain rice variety from Japan and Mediterranean regions##
-entity<|#|>Sueca Plant<|#|>Facility<|#|>Rice processing facility located in Sueca, Spain##
-entity<|#|>HORECA Spain<|#|>Market<|#|>Hotel, restaurant, and catering distribution channel in Spain##
-entity<|#|>EBITDA<|#|>Metric<|#|>Earnings before interest, taxes, depreciation and amortization##
-relation<|#|>Dacsa Group<|#|>Sueca Plant<|#|>Operates rice processing facility<|#|>operations,facility,ownership<|#|>1.0##
-relation<|#|>Japonica<|#|>Rice<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>Sueca Plant<|#|>Japonica<|#|>Processes premium rice variety<|#|>processing,variety,production<|#|>0.9##
-relation<|#|>Dacsa Group<|#|>HORECA Spain<|#|>Supplies rice products to distribution channel<|#|>supply,distribution,market<|#|>0.8##
-relation<|#|>Dacsa Group<|#|>EBITDA<|#|>Reports financial metric<|#|>finance,performance,metric<|#|>0.7##
-<|COMPLETE|>""",
+entity<|#|>dacsa group<|#|>company<|#|>Leading European agribusiness company specializing in rice processing##
+entity<|#|>rice<|#|>product<|#|>Base rice commodity##
+entity<|#|>japonica<|#|>variety<|#|>Premium round grain rice variety from Japan and Mediterranean regions##
+entity<|#|>sueca<|#|>facility<|#|>Rice processing facility located in Sueca, Spain (facility name cleaned: removed "planta")##
+entity<|#|>horeca spain<|#|>market<|#|>Hotel, restaurant, and catering distribution channel in Spain##
+entity<|#|>ebitda<|#|>metric<|#|>Earnings before interest, taxes, depreciation and amortization##
+relation<|#|>dacsa group<|#|>sueca<|#|>Operates rice processing facility<|#|>operations,facility,ownership<|#|>1.0##
+relation<|#|>japonica<|#|>rice<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
+relation<|#|>sueca<|#|>japonica<|#|>Processes premium rice variety<|#|>processing,variety,production<|#|>0.9##
+relation<|#|>dacsa group<|#|>horeca spain<|#|>Supplies rice products to distribution channel<|#|>supply,distribution,market<|#|>0.8##
+relation<|#|>dacsa group<|#|>ebitda<|#|>Reports financial metric<|#|>finance,performance,metric<|#|>0.7##
+<|COMPLETE|>
 
-    """Example 2: Anti-Noise Filtering
+NOTE: All entities in lowercase. "Sueca Plant" → "sueca" (removed "Plant" descriptor).
+""",
+
+    """Example 2: Anti-Noise Filtering + Lowercase Enforcement
 Input: "Ebro Foods lidera el mercado español de legumbres con garbanzos y lentejas. El algodón en India crece 15%."
 
 Output:
-entity<|#|>Ebro Foods<|#|>Company<|#|>Leading Spanish food company specializing in rice and pulses##
-entity<|#|>Pulses<|#|>Product<|#|>Base pulses commodity category##
-entity<|#|>Chickpea Flour<|#|>Variety<|#|>Processed chickpea flour for food manufacturing##
-entity<|#|>Red Lentil Flour<|#|>Variety<|#|>Processed red lentil flour for food manufacturing##
-relation<|#|>Chickpea Flour<|#|>Pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>Red Lentil Flour<|#|>Pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>Ebro Foods<|#|>Chickpea Flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
-relation<|#|>Ebro Foods<|#|>Red Lentil Flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
-<|COMPLETE|>""",
+entity<|#|>ebro foods<|#|>company<|#|>Leading Spanish food company specializing in rice and pulses##
+entity<|#|>pulses<|#|>product<|#|>Base pulses commodity category##
+entity<|#|>chickpea flour<|#|>variety<|#|>Processed chickpea flour for food manufacturing##
+entity<|#|>red lentil flour<|#|>variety<|#|>Processed red lentil flour for food manufacturing##
+relation<|#|>chickpea flour<|#|>pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
+relation<|#|>red lentil flour<|#|>pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
+relation<|#|>ebro foods<|#|>chickpea flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
+relation<|#|>ebro foods<|#|>red lentil flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
+<|COMPLETE|>
 
-    """Example 3: ANTI-INFERENCE - Ranking Tables (NO Ownership Relationships)
+NOTE: "algodón" (cotton) NOT extracted - not in product whitelist. "15%" NOT extracted - numeric value.
+""",
+
+    """Example 3: ANTI-INFERENCE - Ranking Tables + Lowercase
 Input: "Top 5 empresas arroceras españolas 2024: 1. Ebro Foods (Herba Ricemills), 2. Dacsa Group, 3. Arrocerías Pons, 4. Coop. Montsiá, 5. SOS Grupo."
 
 Output:
-entity<|#|>Ebro Foods<|#|>Company<|#|>Leading Spanish rice company, operates Herba Ricemills##
-entity<|#|>Herba Ricemills<|#|>Company<|#|>Rice processing company, subsidiary of Ebro Foods##
-entity<|#|>Dacsa Group<|#|>Company<|#|>Major Spanish rice processing company##
-entity<|#|>Arrocerías Pons<|#|>Company<|#|>Spanish rice company##
-entity<|#|>Coop. Montsiá<|#|>Company<|#|>Spanish rice cooperative##
-entity<|#|>SOS Grupo<|#|>Company<|#|>Spanish food company with rice operations##
-relation<|#|>Herba Ricemills<|#|>Ebro Foods<|#|>Is a subsidiary of (explicitly stated in parentheses)<|#|>ownership,subsidiary,corporate<|#|>1.0##
-relation<|#|>Ebro Foods<|#|>Dacsa Group<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
-relation<|#|>Ebro Foods<|#|>Arrocerías Pons<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
-relation<|#|>Dacsa Group<|#|>Coop. Montsiá<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+entity<|#|>ebro foods<|#|>company<|#|>Leading Spanish rice company, operates Herba Ricemills##
+entity<|#|>herba ricemills<|#|>company<|#|>Rice processing company, subsidiary of Ebro Foods##
+entity<|#|>dacsa group<|#|>company<|#|>Major Spanish rice processing company##
+entity<|#|>arrocerías pons<|#|>company<|#|>Spanish rice company##
+entity<|#|>coop. montsiá<|#|>company<|#|>Spanish rice cooperative##
+entity<|#|>sos grupo<|#|>company<|#|>Spanish food company with rice operations##
+relation<|#|>herba ricemills<|#|>ebro foods<|#|>Is a subsidiary of (explicitly stated in parentheses)<|#|>ownership,subsidiary,corporate<|#|>1.0##
+relation<|#|>ebro foods<|#|>dacsa group<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+relation<|#|>ebro foods<|#|>arrocerías pons<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
+relation<|#|>dacsa group<|#|>coop. montsiá<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
 <|COMPLETE|>
 
 EXPLANATION: This is a RANKING TABLE. Companies listed together are COMPETITORS, NOT subsidiaries.
-- ❌ DO NOT extract: "Ebro Foods → owns → Dacsa Group" (WRONG - they compete)
-- ❌ DO NOT extract: "Ebro Foods → parent of → Arrocerías Pons" (WRONG - no ownership stated)
-- ✅ DO extract: "Herba Ricemills → subsidiary of → Ebro Foods" (CORRECT - explicitly stated in parentheses)
+- ❌ DO NOT extract: "ebro foods → owns → dacsa group" (WRONG - they compete)
+- ❌ DO NOT extract: "ebro foods → parent of → arrocerías pons" (WRONG - no ownership stated)
+- ✅ DO extract: "herba ricemills → subsidiary of → ebro foods" (CORRECT - explicitly stated in parentheses)
 - ✅ DO extract: Competition relationships between all companies (they are in same ranking)
+- ✅ All entities in lowercase
 """,
 ]
 
