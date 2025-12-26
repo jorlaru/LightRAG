@@ -1,0 +1,15 @@
+# Regiones geográficas
+
+regions:
+  spanish:
+    - "Valencia"
+    - "Andalucía"
+    - "Delta del Ebro"
+    - "Extremadura"
+    - "Sevilla"
+    - "Tarragona"
+
+  international:
+    - "Southeast Asia"
+    - "California"
+    - "Punjab"

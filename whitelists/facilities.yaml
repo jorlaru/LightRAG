@@ -1,0 +1,19 @@
+# Instalaciones industriales
+
+facilities:
+  processing_plants:
+    - "planta"
+    - "fábrica"
+    - "factoría"
+    - "plant"
+    - "factory"
+
+  storage:
+    - "almacén"
+    - "warehouse"
+    - "silo"
+
+  headquarters:
+    - "sede"
+    - "headquarters"
+    - "central"

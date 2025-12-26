@@ -1,9 +1,10 @@
 """
 LightRAG Prompts - Dacsa Group Edition
 
-Versión: 1.1.7 - ANTI-INFERENCE PATCH
+Versión: 1.5.0 - WHITELIST REFACTOR + ANTI-INFERENCE PATCH
 Fecha: 2024-12-26
 
+MAJOR REFACTOR: Whitelists externalizadas a YAML + PERSON entity disabled
 CRITICAL FIX: Prevent false ownership relationships from ranking tables
 
 PROBLEMA RESUELTO:
@@ -11,7 +12,15 @@ PROBLEMA RESUELTO:
 - ❌ v1.5.1: ETG Group → Acquired → Dacsa (FALSO - ETG adquirió Industrias Racionero, NO Dacsa)
 - ✅ v1.1.7: NO inferir ownership de tablas de rankings
 
-CAMBIOS v1.1.7:
+CAMBIOS v1.5.0 (WHITELIST REFACTOR):
+- 📁 Whitelists externalizadas a archivos YAML en whitelists/
+- 🔄 Normalización automática case-insensitive (LARGO = largo)
+- 🔍 Soporte patrones regex para entidades complejas
+- ❌ PERSON entity DESACTIVADA (reduce ruido en el grafo)
+- 🎯 Gestor centralizado whitelist_loader.py
+- 📝 Configuración mediante whitelists/config.yaml
+
+CAMBIOS v1.1.7 (ANTI-INFERENCE PATCH):
 - 🔒 Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary/acquired relationships
 - 🔒 Manejo especial de tablas de rankings (empresas listadas = competidores, NO subsidiarias)
 - 🔒 Validación de plausibilidad para relaciones críticas (ownership, acquisition, merger)
@@ -34,6 +43,18 @@ CRITICAL: Compatible con HKUDS/LightRAG oficial - NO INVENTAR VARIABLES
 from __future__ import annotations
 from typing import Any
 import re
+import sys
+from pathlib import Path
+
+# Add parent directory to path for whitelist_loader import
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+try:
+    from whitelist_loader import WhitelistLoader, EntityPatterns
+    WHITELIST_LOADER_AVAILABLE = True
+except ImportError:
+    WHITELIST_LOADER_AVAILABLE = False
+    print("⚠️  WhitelistLoader not available, using hardcoded whitelists")
 
 # ============================================================================
 # 1. DICCIONARIOS DE TRADUCCIÓN ES→EN (v1.5.0 - 56 varieties + 8 products)
@@ -135,6 +156,37 @@ VARIETY_TRANSLATIONS = {
     'fibra de legumbres': 'Pulse Fiber',
     'harina de legumbres tostadas': 'Toasted Pulse Flour',
 }
+
+# ============================================================================
+# 1.5. WHITELIST LOADER INITIALIZATION (v1.5.0 - External YAML Management)
+# ============================================================================
+
+# Initialize WhitelistLoader if available
+if WHITELIST_LOADER_AVAILABLE:
+    try:
+        # Determine the correct path to whitelists directory
+        whitelists_path = Path(__file__).parent.parent / "whitelists"
+        loader = WhitelistLoader(str(whitelists_path))
+        patterns = EntityPatterns(str(Path(__file__).parent.parent / "config" / "entity_patterns.yaml"))
+
+        print("✅ Whitelists cargadas desde YAML")
+        print(f"   - Variedades: {len(loader.get_varieties())} entradas")
+        print(f"   - Productos: {len(loader.get_products())} entradas")
+        print(f"   - Empresas: {len(loader.get_companies())} entradas")
+        print(f"   - Marcas: {len(loader.get_brands())} entradas")
+
+        # Check PERSON entity status
+        if not loader.is_entity_enabled('person'):
+            print("   - ✅ PERSON entity DESACTIVADA (según config.yaml)")
+
+    except Exception as e:
+        print(f"⚠️  Error loading whitelists: {e}")
+        print("   Falling back to hardcoded whitelists")
+        loader = None
+        patterns = None
+else:
+    loader = None
+    patterns = None
 
 # ============================================================================
 # 2. PRODUCT-VARIETY HIERARCHY (65 Industrial Specifications)
@@ -614,9 +666,10 @@ Pea Protein Isolate, Pulse Starch, Pulse Fiber, Toasted Pulse Flour
 Named or specifically located industrial installations.
 Examples: Sueca Plant, Valencia Mill
 
-## 6. PERSON
-Named individuals. Extract NAME ONLY (no role in entity_name).
-Role should be in description if relevant.
+## 6. PERSON [DISABLED - v1.5.0 Whitelist Refactor]
+**ENTITY TYPE DISABLED** - Do not extract person entities
+Previous definition: Named individuals (NAME ONLY, no role in entity_name)
+**Note:** This entity type has been disabled to reduce noise in the knowledge graph
 
 ## 7. TECHNOLOGY
 Industrial processing technologies. Examples from keywords:
@@ -896,21 +949,28 @@ PROMPTS['entity_extraction_system_prompt'] = PROMPTS['entity_extraction_system_p
 # ============================================================================
 
 print("="*80)
-print("✅ LIGHTRAG CUSTOM PROMPTS v1.1.7 LOADED SUCCESSFULLY")
+print("✅ LIGHTRAG CUSTOM PROMPTS v1.5.0 LOADED SUCCESSFULLY")
 print("="*80)
-print("🆕 CAMBIOS v1.1.7 (ANTI-INFERENCE PATCH):")
+print("🆕 CAMBIOS v1.5.0 (WHITELIST REFACTOR):")
+print("   - Whitelists externalizadas a archivos YAML")
+print("   - Normalización automática case-insensitive")
+print("   - Soporte para patrones regex avanzados")
+print("   - PERSON entity DESACTIVADA (reduce ruido)")
+print("   - Gestión centralizada vía whitelist_loader.py")
+print("")
+print("🔒 FEATURES v1.1.7 (ANTI-INFERENCE PATCH):")
 print("   - Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary")
 print("   - Manejo especial tablas de rankings (competidores, NO subsidiarias)")
 print("   - Validación plausibilidad relaciones críticas")
 print("   - Ejemplo negativo: tabla de rankings → NO ownership")
 print("")
-print("📋 FEATURES MANTENIDAS DE v1.5.1:")
+print("📋 FEATURES CORE:")
 print("   - 56 variety translations + 8 product translations")
 print("   - Regex normalization by entity type")
 print("   - Duplicate detection (similarity-based)")
 print("   - Whitelist validation (6 products, 65 varieties, 20 metrics, 17 processes)")
 print("   - Aggressive blacklist anti-noise filter")
-print("   - 10 entity types (not 15)")
+print("   - 9 entity types (PERSON disabled)")
 print("   - Compatible with HKUDS/LightRAG official format")
 print("   - NO invented variables (v1.1.6 style examples)")
 print("="*80)

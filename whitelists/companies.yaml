@@ -1,0 +1,16 @@
+# Empresas del sector arrocero
+
+companies:
+  spanish:
+    - "Dacsa Group"
+    - "COOP. ARROZÚA"
+    - "P. ARNANDIS MARTÍNEZ, S.A."
+    - "PASAMAR"
+    - "Ebro Foods"
+    - "SOS"
+    - "Nomen"
+    - "Herba"
+
+  international:
+    - "Bühler"
+    - "Satake"

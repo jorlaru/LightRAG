@@ -1,0 +1,24 @@
+# Configuración general de whitelists
+version: "1.5.0"
+case_sensitive: false  # Normalización automática a lowercase
+enable_regex: true     # Activar patrones regex
+merge_translations: true  # Fusionar español/inglés
+
+# Entidades activas
+enabled_entities:
+  - variety
+  - product
+  - brand
+  - company
+  - facility
+  - country
+  - region
+  - market
+  - metric
+  - standard
+  # person: ELIMINADA (antes estaba activa)
+
+# Entidades desactivadas
+disabled_entities:
+  - person  # Eliminada según requisito
+  - organization  # Si quieres eliminar también

@@ -1,0 +1,10 @@
+# Mercados y canales de distribución
+
+markets:
+  - "retail"
+  - "foodservice"
+  - "industrial"
+  - "export"
+  - "domestic"
+  - "horeca"
+  - "gran distribución"

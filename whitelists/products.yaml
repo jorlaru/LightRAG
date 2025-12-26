@@ -1,0 +1,50 @@
+# Productos derivados del arroz
+
+products:
+  arroz:
+    names: ["arroz", "rice"]
+    category: "grain"
+
+  harina:
+    names: ["harina de arroz", "rice flour", "harina arroz fina", "rice flour fine"]
+    category: "flour"
+
+  semola:
+    names: ["sémola de arroz", "rice semolina", "semola"]
+    category: "semolina"
+
+  proteina:
+    names: ["concentrado proteína arroz", "rice protein concentrate"]
+    category: "protein"
+
+  almidon:
+    names:
+      - "almidón de arroz nativo"
+      - "rice starch native"
+      - "almidón de arroz modificado"
+      - "rice starch modified"
+    category: "starch"
+
+  harina_precocida:
+    names: ["harina arroz precocida", "rice precooked flour"]
+    category: "flour"
+
+  harina_gelatinizada:
+    names: ["harina arroz gelatinizada", "rice gelatinized flour"]
+    category: "flour"
+
+  harina_integral:
+    names: ["harina arroz integral", "rice brown flour"]
+    category: "flour"
+
+  arroz_partido:
+    names: ["arroz partido", "broken rice"]
+    category: "grain"
+
+  vasitos:
+    names: ["vasitos de arroz", "rice cups"]
+    category: "prepared"
+
+  pasta:
+    names: ["pasta de arroz", "rice pasta"]
+    category: "pasta"
