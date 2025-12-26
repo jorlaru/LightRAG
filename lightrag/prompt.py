@@ -282,6 +282,11 @@ ENTITY_BLACKLIST = {
     
     # Acrónimos problemáticos
     'fa', 'cv', 'dw', 'na', 'nd', 'tbd', 'etc',
+
+    # Unidades y símbolos (NUNCA son entidades)
+    '%', '€', '$', '£', '¥', 'kg', 'ton', 'tons', 'mt', 'l', 'ml', 'g',
+    '€/kg', '$/kg', '€/ton', '$/ton', 'percent', 'percentage',
+    'kilogram', 'kilograms', 'liter', 'liters', 'litres', 'gram', 'grams',
 }
 
 # ============================================================================
@@ -446,38 +451,66 @@ def normalize_company_name(entity_name: str) -> str:
         entity_name: Nombre de la empresa
 
     Returns:
-        Nombre normalizado
+        Nombre normalizado (lowercase)
 
     Examples:
         >>> normalize_company_name('EBRO FOODS S.A.')
-        'Ebro Foods'
+        'ebro foods'
+        >>> normalize_company_name('4 Hijos de Rivera SL')
+        '4 hijos de rivera'
         >>> normalize_company_name('Dacsa SA')
-        'Dacsa Group'
+        'dacsa group'
     """
     normalized = entity_name.strip()
 
-    # Eliminar sufijos legales
-    suffixes = [' S.A.', ' SA', ' S.L.', ' SL', ' Inc.', ' Ltd.', ' LLC',
-                ' Corp.', ' Corporation', ' GmbH', ' AG', ' N.V.', ' B.V.']
-    for suffix in suffixes:
-        if normalized.upper().endswith(suffix.upper()):
-            normalized = normalized[:-len(suffix)].strip()
+    # Eliminar sufijos legales (case-insensitive)
+    # Incluye versiones con puntos y sin puntos, mayúsculas y minúsculas
+    suffixes = [
+        r'\s+s\.a\.$',     # S.A.
+        r'\s+sa$',         # SA
+        r'\s+s\.l\.$',     # S.L.
+        r'\s+sl$',         # SL
+        r'\s+s\.a\.u\.$',  # S.A.U.
+        r'\s+sau$',        # SAU
+        r'\s+inc\.$',      # Inc.
+        r'\s+inc$',        # Inc
+        r'\s+ltd\.$',      # Ltd.
+        r'\s+ltd$',        # Ltd
+        r'\s+llc$',        # LLC
+        r'\s+corp\.$',     # Corp.
+        r'\s+corp$',       # Corp
+        r'\s+corporation$',# Corporation
+        r'\s+gmbh$',       # GmbH
+        r'\s+ag$',         # AG
+        r'\s+n\.v\.$',     # N.V.
+        r'\s+nv$',         # NV
+        r'\s+b\.v\.$',     # B.V.
+        r'\s+bv$',         # BV
+        r'\s+plc$',        # PLC
+        r'\s+co\.$',       # Co.
+        r'\s+limited$',    # Limited
+    ]
 
-    # Aplicar aliases de Dacsa
+    for suffix_pattern in suffixes:
+        normalized = re.sub(suffix_pattern, '', normalized, flags=re.IGNORECASE)
+
+    # Limpiar espacios múltiples
+    normalized = re.sub(r'\s+', ' ', normalized).strip()
+
+    # Aplicar aliases de Dacsa (antes de lowercase)
     dacsa_aliases = {
-        'Dacsa S.A.': 'Dacsa Group',
-        'Dacsa SA': 'Dacsa Group',
-        'Grupo Dacsa': 'Dacsa Group',
-        'DACSA': 'Dacsa Group',
+        'dacsa s.a.': 'dacsa group',
+        'dacsa sa': 'dacsa group',
+        'grupo dacsa': 'dacsa group',
+        'dacsa': 'dacsa group',
     }
 
-    if normalized in dacsa_aliases:
-        normalized = dacsa_aliases[normalized]
+    normalized_lower = normalized.lower()
+    if normalized_lower in dacsa_aliases:
+        return dacsa_aliases[normalized_lower]
 
-    # Title Case final
-    normalized = normalized.title()
-
-    return normalized
+    # Lowercase final (v1.5.0 normalization)
+    return normalized.lower()
 
 
 # ============================================================================
@@ -643,56 +676,91 @@ def are_entities_duplicates(name1: str, name2: str, entity_type: str, threshold:
 # 8. FUNCIÓN DE VALIDACIÓN ANTI-RUIDO
 # ============================================================================
 
-def should_filter_entity(entity_name: str) -> bool:
+def should_filter_entity(entity_name: str, entity_type: str = None) -> bool:
     """
     Determina si una entidad debe ser filtrada (rechazada).
-    
+
     Criterios de filtrado:
         - Nombre en blacklist
         - Nombre muy corto (< 3 caracteres)
         - Solo números o porcentajes
         - Años sueltos (2020-2030)
-    
+        - Valores métricos (%, €/kg, etc.) en vez de nombres de métricas
+        - Unidades de medida (kg, tons, mt, etc.)
+
     Args:
         entity_name: Nombre de la entidad
-    
+        entity_type: Tipo de entidad (opcional, para validación específica)
+
     Returns:
         True si debe ser filtrada (rechazada)
-    
+
     Examples:
         >>> should_filter_entity('market')
         True
         >>> should_filter_entity('2024')
         True
-        >>> should_filter_entity('Dacsa Group')
+        >>> should_filter_entity('%')
+        True
+        >>> should_filter_entity('€/kg')
+        True
+        >>> should_filter_entity('production capacity', 'metric')
         False
     """
     name_lower = entity_name.lower().strip()
-    
+
     # Blacklist directa
     if name_lower in ENTITY_BLACKLIST:
         return True
-    
+
     # Nombre muy corto
     if len(name_lower) < 3:
         return True
-    
+
     # Solo números
     if entity_name.strip().isdigit():
         return True
-    
-    # Porcentajes
-    if '%' in entity_name or 'percent' in name_lower:
+
+    # Porcentajes y símbolos monetarios (CRÍTICO para métricas)
+    if '%' in entity_name:
         return True
-    
+    if any(symbol in entity_name for symbol in ['€', '$', '£', '¥']):
+        return True
+
+    # Unidades de medida (kg, tons, mt, l, ml, etc.)
+    unit_patterns = [
+        r'\b(kg|kilogram|kilograms)\b',
+        r'\b(ton|tons|tonnes|mt)\b',
+        r'\b(liter|liters|litres|l)\b',
+        r'\b(gram|grams|g)\b',
+        r'\b(hectare|hectares|ha)\b',
+        r'\b(meter|meters|metre|metres|m)\b',
+        r'\b(€/kg|$/kg|€/ton|$/ton)\b',
+        r'\b(percent|percentage)\b',
+    ]
+    for pattern in unit_patterns:
+        if re.search(pattern, name_lower):
+            return True
+
     # Años (2020-2030)
     if re.match(r'^20[0-3]\d$', entity_name.strip()):
         return True
-    
-    # Cantidades monetarias
-    if re.match(r'^[$€£]\d+', entity_name.strip()):
+
+    # Cantidades con símbolos o números
+    if re.match(r'^[$€£¥]\d+', entity_name.strip()):
         return True
-    
+    if re.match(r'^\d+[\d,\.]*\s*(kg|ton|tons|mt|€|$)', name_lower):
+        return True
+
+    # CRÍTICO para METRICS: rechazar si contiene números (las métricas son NOMBRES, no valores)
+    if entity_type and entity_type.lower() == 'metric':
+        # Métricas NO deben contener números
+        if re.search(r'\d', entity_name):
+            return True
+        # Métricas NO deben ser solo símbolos
+        if entity_name in ['%', '€', '$', '£']:
+            return True
+
     return False
 
 
@@ -763,14 +831,24 @@ Parboiling System, Milling System, Packaging Line, Automation System,
 Quality Control System, Conveyor System, Storage Silo, Weighing System
 
 ## 8. METRIC (20 KPIs ONLY)
-**STRICT WHITELIST:**
-Production Capacity, Production Volume, Processing Capacity, Storage Capacity,
-Yield Rate, Moisture Content, Protein Content, Broken Grain Rate,
-Revenue, EBITDA, Operating Margin, Market Share, Sales Volume,
-Unit Price, Energy Consumption, Water Consumption, Waste Reduction,
-Delivery Time, Inventory Turnover, Supplier Lead Time
+**STRICT WHITELIST (lowercase):**
+production capacity, production volume, processing capacity, storage capacity,
+yield rate, moisture content, protein content, broken grain rate,
+revenue, ebitda, operating margin, market share, sales volume,
+unit price, energy consumption, water consumption, waste reduction,
+delivery time, inventory turnover, supplier lead time
 
-Extract metric NAME only, NEVER values (no numbers, percentages).
+**CRITICAL RULES:**
+- Extract ONLY the metric NAME (e.g., "unit price", "ebitda")
+- NEVER extract VALUES: ❌ "50%", "€5/kg", "1000 tons"
+- NEVER extract UNITS: ❌ "%", "€/kg", "kg", "tons"
+- NEVER extract NUMBERS: ❌ "5", "100", "2024"
+- If text says "EBITDA increased 15%" → extract ONLY "ebitda", NOT "15%"
+- If text says "Unit price: €5/kg" → extract ONLY "unit price", NOT "€5/kg"
+
+**Examples:**
+✅ Correct: "revenue", "production capacity", "ebitda"
+❌ Wrong: "50%", "€5/kg", "1000 tons", "15%"
 
 ## 9. PROCESS (17 processes ONLY)
 **STRICT WHITELIST:**
@@ -831,22 +909,31 @@ Your task is to extract structured information (entities and relationships) with
    - **CRITICAL**: Normalize ALL entities to lowercase to prevent duplicates
 
 2. **Entity Extraction:**
-   - Extract ONLY concrete, specific entities (companies, products, facilities, people)
+   - Extract ONLY concrete, specific entities (companies, products, facilities)
    - NEVER extract generic concepts: "market", "price", "trend", "growth", "cotton"
    - NEVER extract standalone years (2024, 2025), percentages, monetary values
    - NEVER extract acronyms < 3 letters unless well-known organizations
    - Minimum entity name length: 3 characters
-   - Normalize company names by removing legal suffixes (S.A., Inc., Ltd.)
+   - **COMPANY NAMES**: Remove ALL legal suffixes (S.A., SA, S.L., SL, Inc., Ltd., LLC, etc.)
+     - ✅ Correct: "4 hijos de rivera" (removed SL)
+     - ❌ Wrong: "4 hijos de rivera sl", "Dacsa S.A."
    - **FACILITY NAMES**: Extract ONLY the location name, NO descriptors (Mill, Plant, Production, etc.)
-     - ✅ Correct: "Valencia" or "Sueca"
+     - ✅ Correct: "valencia" or "sueca"
      - ❌ Wrong: "Valencia Mill", "Sueca Plant", "Production Facility in Sevilla"
+   - **METRIC NAMES**: Extract ONLY metric names, NEVER values, percentages, or units
+     - ✅ Correct: "unit price", "ebitda", "production capacity"
+     - ❌ Wrong: "%", "€/kg", "50%", "1000 tons"
 
 3. **Entity Types:**
 {entity_types}
 
 4. **Blacklisted Terms (NEVER extract):**
-   market, price, trend, growth, production, consumption, demand, supply, cotton,
-   analysis, data, report, study, year, quarter, period, Q1, Q2, Q3, Q4
+   - Generic terms: market, price, trend, growth, production, consumption, demand, supply
+   - Commodities: cotton, oats, sugar, coffee (not in product whitelist)
+   - Analysis terms: analysis, data, report, study, research, forecast
+   - Temporal: year, month, quarter, period, Q1, Q2, Q3, Q4, 2024, 2025
+   - **Units & Symbols**: %, €, $, £, kg, ton, tons, mt, l, ml, g, €/kg, $/kg
+   - **Percentages/Values**: 50%, 15%, 100, 1000, any numeric values
 
 5. **Product-Variety Hierarchy & STRICT Whitelist Enforcement:**
    - PRODUCT whitelist: rice, maize, wheat, rye, barley, pulses (ONLY these 6, in lowercase)
