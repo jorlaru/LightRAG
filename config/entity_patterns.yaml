@@ -1,0 +1,75 @@
+# Patrones regex para extracción avanzada de entidades
+# Estos patrones capturan variantes complejas no cubiertas por whitelists exactas
+
+variety:
+  # Patrón: ARROZ + VARIEDAD
+  - 'arroz\s+(largo|redondo|bomba|basmati|integral|vaporizado|salvaje|thai|jasmin|sushi)'
+
+  # Patrón: VARIEDAD + rice
+  - '(long|round|brown|parboiled|bomba|basmati|wild|jasmine|sushi)\s+grain\s+rice'
+  - '(bomba|basmati|jasmine|sushi)\s+rice'
+
+  # Patrón: tipo de/variety of
+  - '(tipo|variedad)\s+de\s+arroz:\s*(\w+)'
+  - 'rice\s+(variety|type):\s*(\w+)'
+
+  # Patrón: Exóticos + tipo
+  - 'exóticos\s+(risotto|thai|jazmin|sushi|salvaje|origen)'
+
+product:
+  # Patrón: HARINA + especificación
+  - 'harina\s+de\s+arroz\s+(fina|integral|precocida|gelatinizada)'
+  - 'rice\s+flour\s+(fine|brown|precooked|gelatinized)'
+
+  # Patrón: ALMIDÓN + tipo
+  - 'almidón\s+de\s+arroz\s+(nativo|modificado)'
+  - 'rice\s+starch\s+(native|modified)'
+
+  # Patrón: productos derivados
+  - 'rice\s+(flour|starch|protein|semolina|bran)'
+  - '(concentrado|aislado)\s+de?\s+proteína\s+de\s+arroz'
+
+metric:
+  # Patrón: cantidades con unidades
+  - '(\d+[\d,\.]*)\s*(toneladas|tons?|kg|mt|quintales)'
+
+  # Patrón: valores monetarios
+  - '(revenue|ingresos|ventas|facturación):\s*[€$]?\s*(\d+[\d,\.]*)\s*(millones?|M|K)?'
+
+  # Patrón: porcentajes
+  - '(\d+[\d,\.]*)\s*%\s*(crecimiento|aumento|reducción|margen)'
+
+  # Patrón: capacidad de producción
+  - 'capacidad\s+de\s+(\d+[\d,\.]*)\s*(t/año|toneladas/año)'
+
+company:
+  # Patrón: nombres con S.A., S.L., etc.
+  - '(\w+(?:\s+\w+)*)\s*,?\s*(S\.A\.|S\.L\.|COOP\.|SL|SA)'
+
+  # Patrón: Grupo + nombre
+  - 'Grupo\s+(\w+(?:\s+\w+)*)'
+  - '(\w+)\s+Group'
+
+brand:
+  # Marcas entre comillas
+  - '"([^"]+)"\s+brand'
+  - 'marca\s+"([^"]+)"'
+
+facility:
+  # Patrón: instalaciones con ubicación
+  - '(planta|fábrica|factoría)\s+de\s+(\w+)'
+  - '(plant|factory)\s+in\s+(\w+)'
+
+  # Patrón: instalaciones con tipo
+  - '(almacén|warehouse|silo)\s+de\s+(arroz|rice)'
+
+# Patrones de exclusión (para filtrar falsos positivos)
+exclude:
+  # No capturar años como métricas
+  - '(19|20)\d{2}'
+
+  # No capturar porcentajes solos sin contexto
+  - '^\d+%$'
+
+  # No capturar fechas
+  - '\d{1,2}[/-]\d{1,2}[/-]\d{2,4}'

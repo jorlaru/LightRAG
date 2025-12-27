@@ -1,0 +1,20 @@
+# Estándares y certificaciones
+
+standards:
+  quality:
+    - "ISO 9001"
+    - "HACCP"
+    - "BRC"
+    - "IFS"
+    - "GlobalGAP"
+
+  sustainability:
+    - "Organic"
+    - "Bio"
+    - "Rainforest Alliance"
+    - "Fairtrade"
+
+  food_safety:
+    - "FDA"
+    - "EFSA"
+    - "AESAN"

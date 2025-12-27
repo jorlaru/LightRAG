@@ -1,0 +1,27 @@
+# Métricas y KPIs
+
+metrics:
+  production:
+    - "toneladas"
+    - "tons"
+    - "producción"
+    - "production"
+    - "capacidad"
+    - "capacity"
+
+  financial:
+    - "ingresos"
+    - "revenue"
+    - "ventas"
+    - "sales"
+    - "facturación"
+    - "turnover"
+    - "margen"
+    - "margin"
+    - "EBITDA"
+
+  quality:
+    - "calidad"
+    - "quality"
+    - "certificación"
+    - "certification"

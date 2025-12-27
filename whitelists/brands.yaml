@@ -1,0 +1,15 @@
+# Marcas comerciales de arroz
+
+brands:
+  dacsa:
+    - "Nomen"
+    - "Bayo"
+    - "Segadors del Delta"
+
+  coop_arrozua:
+    - "Doña Ana"
+    - "El Ruedo"
+
+  pasamar:
+    - "Embajador"
+    - "Aguila Oro"

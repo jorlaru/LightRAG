@@ -1,0 +1,74 @@
+# Productos derivados del arroz
+# NOTA: La normalización a lowercase es automática via whitelist_loader
+
+products:
+  # Productos base whitelisted (6 ONLY)
+  rice:
+    names: ["arroz", "rice"]
+    category: "grain"
+
+  maize:
+    names: ["maíz", "maiz", "maize", "corn"]
+    category: "grain"
+
+  wheat:
+    names: ["trigo", "wheat"]
+    category: "grain"
+
+  rye:
+    names: ["centeno", "rye"]
+    category: "grain"
+
+  barley:
+    names: ["cebada", "barley"]
+    category: "grain"
+
+  pulses:
+    names: ["legumbres", "legumbre", "pulses"]
+    category: "grain"
+
+  # Productos derivados
+
+  harina:
+    names: ["harina de arroz", "rice flour", "harina arroz fina", "rice flour fine"]
+    category: "flour"
+
+  semola:
+    names: ["sémola de arroz", "rice semolina", "semola"]
+    category: "semolina"
+
+  proteina:
+    names: ["concentrado proteína arroz", "rice protein concentrate"]
+    category: "protein"
+
+  almidon:
+    names:
+      - "almidón de arroz nativo"
+      - "rice starch native"
+      - "almidón de arroz modificado"
+      - "rice starch modified"
+    category: "starch"
+
+  harina_precocida:
+    names: ["harina arroz precocida", "rice precooked flour"]
+    category: "flour"
+
+  harina_gelatinizada:
+    names: ["harina arroz gelatinizada", "rice gelatinized flour"]
+    category: "flour"
+
+  harina_integral:
+    names: ["harina arroz integral", "rice brown flour"]
+    category: "flour"
+
+  arroz_partido:
+    names: ["arroz partido", "broken rice"]
+    category: "grain"
+
+  vasitos:
+    names: ["vasitos de arroz", "rice cups"]
+    category: "prepared"
+
+  pasta:
+    names: ["pasta de arroz", "rice pasta"]
+    category: "pasta"
