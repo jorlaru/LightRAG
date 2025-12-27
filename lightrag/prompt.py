@@ -1,1166 +1,432 @@
-"""
-LightRAG Prompts - Dacsa Group Edition
-
-Versión: 1.5.0 - WHITELIST REFACTOR + ANTI-INFERENCE PATCH
-Fecha: 2024-12-26
-
-MAJOR REFACTOR: Whitelists externalizadas a YAML + PERSON entity disabled
-CRITICAL FIX: Prevent false ownership relationships from ranking tables
-
-PROBLEMA RESUELTO:
-- ❌ v1.5.1: Ebro Foods → Parent of → Dacsa (FALSO - son competidores)
-- ❌ v1.5.1: ETG Group → Acquired → Dacsa (FALSO - ETG adquirió Industrias Racionero, NO Dacsa)
-- ✅ v1.1.7: NO inferir ownership de tablas de rankings
-
-CAMBIOS v1.5.0 (WHITELIST REFACTOR):
-- 📁 Whitelists externalizadas a archivos YAML en whitelists/
-- 🔄 Normalización automática case-insensitive (LARGO = largo)
-- 🔍 Soporte patrones regex para entidades complejas
-- ❌ PERSON entity DESACTIVADA (reduce ruido en el grafo)
-- 🎯 Gestor centralizado whitelist_loader.py
-- 📝 Configuración mediante whitelists/config.yaml
-
-CAMBIOS v1.1.7 (ANTI-INFERENCE PATCH):
-- 🔒 Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary/acquired relationships
-- 🔒 Manejo especial de tablas de rankings (empresas listadas = competidores, NO subsidiarias)
-- 🔒 Validación de plausibilidad para relaciones críticas (ownership, acquisition, merger)
-- 🔒 Ejemplo negativo: tabla de rankings → NO extraer ownership relationships
-- ✅ Mantiene todas las features de v1.5.1 (traducciones, whitelists, blacklists, etc.)
-
-FEATURES MANTENIDAS DE v1.5.1:
-- ✅ Traducciones ES→EN offline (56 variedades + 8 productos)
-- ✅ Normalización regex por tipo de entidad
-- ✅ Detección de duplicados (similarity-based)
-- ✅ Validación contra whitelists
-- ✅ Blacklist anti-ruido agresiva
-- ✅ 10 tipos de entidad (no 15)
-- ✅ 20 métricas (no 15)
-- ✅ Prompts sin variables inventadas (formato v1.1.6)
-
-CRITICAL: Compatible con HKUDS/LightRAG oficial - NO INVENTAR VARIABLES
-"""
-
 from __future__ import annotations
 from typing import Any
-import re
-import sys
-from pathlib import Path
 
-# Add parent directory to path for whitelist_loader import
-sys.path.insert(0, str(Path(__file__).parent.parent))
 
-try:
-    from whitelist_loader import WhitelistLoader, EntityPatterns, clean_facility_name
-    WHITELIST_LOADER_AVAILABLE = True
-except ImportError:
-    WHITELIST_LOADER_AVAILABLE = False
-    print("⚠️  WhitelistLoader not available, using hardcoded whitelists")
+PROMPTS: dict[str, Any] = {}
 
-    # Fallback clean_facility_name if loader not available
-    def clean_facility_name(name: str) -> str:
-        return name
-
-# ============================================================================
-# 1. DICCIONARIOS DE TRADUCCIÓN ES→EN (v1.5.0 - 56 varieties + 8 products)
-# ============================================================================
-
-PRODUCT_TRANSLATIONS = {
-    'arroz': 'Rice',
-    'maíz': 'Maize',
-    'maiz': 'Maize',
-    'trigo': 'Wheat',
-    'centeno': 'Rye',
-    'cebada': 'Barley',
-    'legumbres': 'Pulses',
-    'legumbre': 'Pulses',
-}
-
-VARIETY_TRANSLATIONS = {
-    # MAIZE VARIETIES (15)
-    'sémola cervecera': 'Brewing Grits',
-    'semola cervecera': 'Brewing Grits',
-    'sémola flaking': 'Flaking Grits',
-    'semola flaking': 'Flaking Grits',
-    'sémola polenta': 'Polenta Grits',
-    'semola polenta': 'Polenta Grits',
-    'sémola hominy': 'Hominy Grits',
-    'semola hominy': 'Hominy Grits',
-    'harina de maíz nativa': 'Maize Native Flour',
-    'harina de maiz nativa': 'Maize Native Flour',
-    'harina de maíz precocida': 'Maize Precooked Flour',
-    'harina de maiz precocida': 'Maize Precooked Flour',
-    'harina de maíz estabilizada': 'Maize Stabilized Flour',
-    'harina de maiz estabilizada': 'Maize Stabilized Flour',
-    'harina de maíz tratada térmicamente': 'Maize Heat-treated Flour',
-    'harina de maiz tratada termicamente': 'Maize Heat-treated Flour',
-    'harina de maíz desgerminada': 'Maize Degerminated Flour',
-    'harina de maiz desgerminada': 'Maize Degerminated Flour',
-    'harina masa': 'Masa Flour',
-    'germen de maíz crudo': 'Maize Germ Raw',
-    'germen de maiz crudo': 'Maize Germ Raw',
-    'germen de maíz tostado': 'Maize Germ Toasted',
-    'germen de maiz tostado': 'Maize Germ Toasted',
-    'salvado de maíz': 'Maize Bran',
-    'salvado de maiz': 'Maize Bran',
-    'fibra de maíz': 'Maize Fiber',
-    'fibra de maiz': 'Maize Fiber',
-    'sémola de maíz': 'Maize Semolina',
-    'semola de maiz': 'Maize Semolina',
-    
-    # RICE VARIETIES (15)
-    'japónica': 'Japonica',
-    'japonica': 'Japonica',
-    'índica': 'Indica',
-    'indica': 'Indica',
-    'arroz vaporizado': 'Parboiled Rice',
-    'arroz parboiled': 'Parboiled Rice',
-    'arroz integral': 'Brown Rice',
-    'arroz partido': 'Broken Rice',
-    'harina de arroz fina': 'Rice Flour Fine',
-    'harina de arroz integral': 'Rice Brown Flour',
-    'harina de arroz precocida': 'Rice Precooked Flour',
-    'harina de arroz gelatinizada': 'Rice Gelatinized Flour',
-    'arroz pregelatinizado': 'Pre-gelatinized Rice',
-    'sémola de arroz': 'Rice Semolina',
-    'semola de arroz': 'Rice Semolina',
-    'almidón de arroz nativo': 'Rice Starch Native',
-    'almidon de arroz nativo': 'Rice Starch Native',
-    'almidón de arroz modificado': 'Rice Starch Modified',
-    'almidon de arroz modificado': 'Rice Starch Modified',
-    'concentrado proteico de arroz': 'Rice Protein Concentrate',
-    'harina de arroz grado alimentación infantil': 'Rice Flour Baby Food Grade',
-    
-    # WHEAT VARIETIES (6)
-    'harina de trigo blanda': 'Wheat Soft Flour',
-    'harina de trigo blando': 'Wheat Soft Flour',
-    'harina de trigo duro': 'Wheat Durum Flour',
-    'sémola de trigo': 'Wheat Semolina',
-    'semola de trigo': 'Wheat Semolina',
-    'salvado de trigo': 'Wheat Bran',
-    'germen de trigo': 'Wheat Germ',
-    'harina de trigo integral': 'Wheat Whole Grain Flour',
-    
-    # RYE VARIETIES (1)
-    'harina de centeno': 'Rye Flour',
-    
-    # BARLEY VARIETIES (1)
-    'cebada perlada': 'Barley Pearled',
-    
-    # PULSE VARIETIES (10)
-    'harina de garbanzo': 'Chickpea Flour',
-    'harina de lenteja roja': 'Red Lentil Flour',
-    'harina de lenteja verde': 'Green Lentil Flour',
-    'harina de guisante amarillo': 'Yellow Pea Flour',
-    'harina de guisante verde': 'Green Pea Flour',
-    'harina de haba': 'Faba Bean Flour',
-    'aislado proteico de guisante': 'Pea Protein Isolate',
-    'aislado de proteina de guisante': 'Pea Protein Isolate',
-    'almidón de legumbres': 'Pulse Starch',
-    'almidon de legumbres': 'Pulse Starch',
-    'fibra de legumbres': 'Pulse Fiber',
-    'harina de legumbres tostadas': 'Toasted Pulse Flour',
-}
-
-# ============================================================================
-# 1.5. WHITELIST LOADER INITIALIZATION (v1.5.0 - External YAML Management)
-# ============================================================================
-
-# Initialize WhitelistLoader if available
-if WHITELIST_LOADER_AVAILABLE:
-    try:
-        # Determine the correct path to whitelists directory
-        whitelists_path = Path(__file__).parent.parent / "whitelists"
-        loader = WhitelistLoader(str(whitelists_path))
-        patterns = EntityPatterns(str(Path(__file__).parent.parent / "config" / "entity_patterns.yaml"))
-
-        print("✅ Whitelists cargadas desde YAML")
-        print(f"   - Variedades: {len(loader.get_varieties())} entradas")
-        print(f"   - Productos: {len(loader.get_products())} entradas")
-        print(f"   - Empresas: {len(loader.get_companies())} entradas")
-        print(f"   - Marcas: {len(loader.get_brands())} entradas")
-
-        # Check PERSON entity status
-        if not loader.is_entity_enabled('person'):
-            print("   - ✅ PERSON entity DESACTIVADA (según config.yaml)")
-
-    except Exception as e:
-        print(f"⚠️  Error loading whitelists: {e}")
-        print("   Falling back to hardcoded whitelists")
-        loader = None
-        patterns = None
-else:
-    loader = None
-    patterns = None
-
-# ============================================================================
-# 2. PRODUCT-VARIETY HIERARCHY (65 Industrial Specifications)
-# ============================================================================
-
-# PRODUCT_WHITELIST: lowercase for case-insensitive matching
-PRODUCT_WHITELIST = {'rice', 'maize', 'wheat', 'rye', 'barley', 'pulses'}
-
-VARIETY_TO_PRODUCT_MAP = {
-    # MAIZE (15)
-    'Brewing Grits': 'Maize', 'Flaking Grits': 'Maize', 'Polenta Grits': 'Maize', 'Hominy Grits': 'Maize',
-    'Maize Native Flour': 'Maize', 'Maize Precooked Flour': 'Maize', 'Maize Stabilized Flour': 'Maize',
-    'Maize Heat-treated Flour': 'Maize', 'Maize Degerminated Flour': 'Maize', 'Masa Flour': 'Maize',
-    'Maize Germ Raw': 'Maize', 'Maize Germ Toasted': 'Maize', 'Maize Bran': 'Maize', 'Maize Fiber': 'Maize', 
-    'Maize Semolina': 'Maize',
-    
-    # RICE (15)
-    'Japonica': 'Rice', 'Indica': 'Rice', 'Parboiled Rice': 'Rice', 'Brown Rice': 'Rice', 'Broken Rice': 'Rice',
-    'Rice Flour Fine': 'Rice', 'Rice Brown Flour': 'Rice', 'Rice Precooked Flour': 'Rice',
-    'Rice Gelatinized Flour': 'Rice', 'Pre-gelatinized Rice': 'Rice', 'Rice Semolina': 'Rice',
-    'Rice Starch Native': 'Rice', 'Rice Starch Modified': 'Rice', 'Rice Protein Concentrate': 'Rice',
-    'Rice Flour Baby Food Grade': 'Rice',
-    
-    # WHEAT/RYE/BARLEY (8)
-    'Wheat Soft Flour': 'Wheat', 'Wheat Durum Flour': 'Wheat', 'Wheat Semolina': 'Wheat',
-    'Wheat Bran': 'Wheat', 'Wheat Germ': 'Wheat', 'Wheat Whole Grain Flour': 'Wheat',
-    'Rye Flour': 'Rye', 'Barley Pearled': 'Barley',
-    
-    # PULSES (10)
-    'Chickpea Flour': 'Pulses', 'Red Lentil Flour': 'Pulses', 'Green Lentil Flour': 'Pulses',
-    'Yellow Pea Flour': 'Pulses', 'Green Pea Flour': 'Pulses', 'Faba Bean Flour': 'Pulses',
-    'Pea Protein Isolate': 'Pulses', 'Pulse Starch': 'Pulses', 'Pulse Fiber': 'Pulses', 
-    'Toasted Pulse Flour': 'Pulses',
-}
-
-VARIETY_WHITELIST = set(VARIETY_TO_PRODUCT_MAP.keys())
-
-# ============================================================================
-# 3. SECTOR WHITELISTS (20 Metrics + 17 Processes + 12 Technologies)
-# ============================================================================
-
-METRIC_WHITELIST = {
-    'Production Capacity', 'Production Volume', 'Processing Capacity', 'Storage Capacity', 
-    'Yield Rate', 'Moisture Content', 'Protein Content', 'Broken Grain Rate', 
-    'Revenue', 'EBITDA', 'Operating Margin', 'Market Share', 'Sales Volume', 
-    'Unit Price', 'Energy Consumption', 'Water Consumption', 'Waste Reduction', 
-    'Delivery Time', 'Inventory Turnover', 'Supplier Lead Time',
-}
-
-PROCESS_WHITELIST = {
-    'Hulling', 'Milling', 'Parboiling', 'Drying', 'Cleaning', 'Sorting', 'Grinding', 
-    'Sieving', 'Blending', 'Fortification', 'Coating', 'Packaging', 'Palletizing', 
-    'Loading', 'Quality Testing', 'Metal Detection', 'Visual Inspection',
-}
-
-TECHNOLOGY_KEYWORDS = [
-    'Optical Sorting', 'Color Sorter', 'Metal Detector', 'Infrared Dryer', 
-    'Parboiling System', 'Milling System', 'Packaging Line', 'Automation System', 
-    'Quality Control System', 'Conveyor System', 'Storage Silo', 'Weighing System'
-]
-
-# ============================================================================
-# 4. BLACKLIST ANTI-RUIDO (Filtros Agresivos)
-# ============================================================================
-
-ENTITY_BLACKLIST = {
-    # Términos genéricos de mercado
-    'market', 'markets', 'price', 'prices', 'trend', 'trends', 'growth', 'decline',
-    'increase', 'decrease', 'change', 'changes', 'development', 'developments',
-    'production', 'consumption', 'demand', 'supply', 'trade', 'export', 'import',
-    'volume', 'quantity', 'value', 'cost', 'revenue', 'profit', 'margin',
-    
-    # Términos de análisis
-    'analysis', 'data', 'information', 'report', 'study', 'research', 
-    'model', 'system', 'process', 'method', 'approach', 'strategy',
-    'projection', 'forecast', 'outlook', 'perspective', 'expectation',
-    
-    # Términos temporales
-    'year', 'month', 'quarter', 'period', 'season', 'cycle', 'phase',
-    'q1', 'q2', 'q3', 'q4', 'trimestre', 'ejercicio', 'periodo',
-    
-    # Commodities NO relacionadas con Dacsa
-    'cotton', 'algodón', 'oats', 'avena',
-    
-    # Términos vagos
-    'factor', 'element', 'aspect', 'component', 'characteristic', 'feature',
-    'impact', 'effect', 'influence', 'consequence', 'result', 'outcome',
-    'issue', 'problem', 'challenge', 'opportunity', 'risk', 'benefit',
-    
-    # Acrónimos problemáticos
-    'fa', 'cv', 'dw', 'na', 'nd', 'tbd', 'etc',
-
-    # Unidades y símbolos (NUNCA son entidades)
-    '%', '€', '$', '£', '¥', 'kg', 'ton', 'tons', 'mt', 'l', 'ml', 'g',
-    '€/kg', '$/kg', '€/ton', '$/ton', 'percent', 'percentage',
-    'kilogram', 'kilograms', 'liter', 'liters', 'litres', 'gram', 'grams',
-}
-
-# ============================================================================
-# 5. FUNCIONES DE TRADUCCIÓN (Offline ES→EN)
-# ============================================================================
-
-def translate_entity_to_english(entity_name: str, entity_type: str) -> str:
-    """
-    Traduce entidades ES→EN usando diccionarios offline.
-    
-    Args:
-        entity_name: Nombre de la entidad en español
-        entity_type: Tipo de entidad (Product, Variety, etc.)
-    
-    Returns:
-        Nombre traducido al inglés o nombre original si no hay traducción
-    
-    Examples:
-        >>> translate_entity_to_english('japónica', 'Variety')
-        'Japonica'
-        >>> translate_entity_to_english('harina de maíz', 'Variety')
-        'Maize Native Flour'
-    """
-    name_lower = entity_name.lower().strip()
-    
-    # Traducción directa de Products
-    if entity_type == 'Product' and name_lower in PRODUCT_TRANSLATIONS:
-        return PRODUCT_TRANSLATIONS[name_lower]
-    
-    # Traducción directa de Varieties
-    if entity_type == 'Variety' and name_lower in VARIETY_TRANSLATIONS:
-        return VARIETY_TRANSLATIONS[name_lower]
-    
-    # Fallback: buscar palabra por palabra
-    words = entity_name.split()
-    translated = []
-    for word in words:
-        w_lower = word.lower()
-        if w_lower in PRODUCT_TRANSLATIONS:
-            translated.append(PRODUCT_TRANSLATIONS[w_lower])
-        elif w_lower in VARIETY_TRANSLATIONS:
-            # Buscar coincidencia parcial
-            for es_term, en_term in VARIETY_TRANSLATIONS.items():
-                if w_lower in es_term:
-                    translated.append(en_term.split()[0])
-                    break
-            else:
-                translated.append(word)
-        else:
-            translated.append(word)
-    
-    return ' '.join(translated) if translated else entity_name
-
-
-def get_product_for_variety(variety_name: str) -> str:
-    """
-    Obtiene el Product base para una Variety.
-    
-    Args:
-        variety_name: Nombre de la variedad
-    
-    Returns:
-        Nombre del producto base o None
-    
-    Examples:
-        >>> get_product_for_variety('Japonica')
-        'Rice'
-        >>> get_product_for_variety('Brewing Grits')
-        'Maize'
-    """
-    return VARIETY_TO_PRODUCT_MAP.get(variety_name)
-
-
-# ============================================================================
-# 6. FUNCIONES DE NORMALIZACIÓN (Regex por tipo de entidad)
-# ============================================================================
-
-def normalize_entity_name(entity_name: str, entity_type: str) -> str:
-    """
-    Normaliza nombres de entidades usando regex para evitar duplicados.
-    
-    Casos:
-        - "Ebro Foods" vs "EBRO FOODS" → "Ebro Foods"
-        - "ISO 22000" vs "ISO-22000" → "ISO 22000"
-        - "Production Capacity" vs "production capacity" → "Production Capacity"
-    
-    Args:
-        entity_name: Nombre original de la entidad
-        entity_type: Tipo de entidad (Company, Metric, Process, etc.)
-    
-    Returns:
-        Nombre normalizado según tipo
-    
-    Examples:
-        >>> normalize_entity_name('EBRO FOODS', 'Company')
-        'Ebro Foods'
-        >>> normalize_entity_name('production capacity', 'Metric')
-        'Production Capacity'
-    """
-    if not entity_name or len(entity_name.strip()) == 0:
-        return entity_name
-    
-    normalized = entity_name.strip()
-    
-    # 1. COMPANY: Title Case + eliminar espacios múltiples
-    if entity_type == 'Company':
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-        # Excepciones acrónimos (S.A., S.L.)
-        normalized = re.sub(r'\bS\.a\.\b', 'S.A.', normalized)
-        normalized = re.sub(r'\bS\.l\.\b', 'S.L.', normalized)
-    
-    # 2. METRIC: Title Case (Production Capacity)
-    elif entity_type == 'Metric':
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-    
-    # 3. PROCESS: Title Case (Parboiling, Milling)
-    elif entity_type == 'Process':
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-    
-    # 4. PRODUCT/VARIETY: Title Case
-    elif entity_type in ['Product', 'Variety']:
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-    
-    # 5. BRAND: Respetar mayúsculas originales pero limpiar espacios
-    elif entity_type == 'Brand':
-        normalized = re.sub(r'\s+', ' ', normalized)
-    
-    # 6. FACILITY: Title Case + normalizar términos comunes
-    elif entity_type == 'Facility':
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-        normalized = re.sub(r'\bPlanta\b', 'Plant', normalized)
-        normalized = re.sub(r'\bMolino\b', 'Mill', normalized)
-    
-    # 7. MARKET: Normalizar formato (HORECA España → HORECA Spain)
-    elif entity_type == 'Market':
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = re.sub(r'\bhoreca\b', 'HORECA', normalized, flags=re.IGNORECASE)
-        parts = normalized.split()
-        if len(parts) > 1:
-            parts[1] = parts[1].title()
-        normalized = ' '.join(parts)
-    
-    # 8. TECHNOLOGY/PERSON: Title Case
-    elif entity_type in ['Technology', 'Person']:
-        normalized = re.sub(r'\s+', ' ', normalized)
-        normalized = normalized.title()
-    
-    return normalized
-
-
-def normalize_company_name(entity_name: str) -> str:
-    """
-    Normalización específica para nombres corporativos.
-    Elimina sufijos legales y aplica aliases.
-
-    Args:
-        entity_name: Nombre de la empresa
-
-    Returns:
-        Nombre normalizado (lowercase)
-
-    Examples:
-        >>> normalize_company_name('EBRO FOODS S.A.')
-        'ebro foods'
-        >>> normalize_company_name('4 Hijos de Rivera SL')
-        '4 hijos de rivera'
-        >>> normalize_company_name('Dacsa SA')
-        'dacsa group'
-    """
-    normalized = entity_name.strip()
-
-    # Eliminar sufijos legales (case-insensitive)
-    # Incluye versiones con puntos y sin puntos, mayúsculas y minúsculas
-    suffixes = [
-        r'\s+s\.a\.$',     # S.A.
-        r'\s+sa$',         # SA
-        r'\s+s\.l\.$',     # S.L.
-        r'\s+sl$',         # SL
-        r'\s+s\.a\.u\.$',  # S.A.U.
-        r'\s+sau$',        # SAU
-        r'\s+inc\.$',      # Inc.
-        r'\s+inc$',        # Inc
-        r'\s+ltd\.$',      # Ltd.
-        r'\s+ltd$',        # Ltd
-        r'\s+llc$',        # LLC
-        r'\s+corp\.$',     # Corp.
-        r'\s+corp$',       # Corp
-        r'\s+corporation$',# Corporation
-        r'\s+gmbh$',       # GmbH
-        r'\s+ag$',         # AG
-        r'\s+n\.v\.$',     # N.V.
-        r'\s+nv$',         # NV
-        r'\s+b\.v\.$',     # B.V.
-        r'\s+bv$',         # BV
-        r'\s+plc$',        # PLC
-        r'\s+co\.$',       # Co.
-        r'\s+limited$',    # Limited
-    ]
-
-    for suffix_pattern in suffixes:
-        normalized = re.sub(suffix_pattern, '', normalized, flags=re.IGNORECASE)
-
-    # Limpiar espacios múltiples
-    normalized = re.sub(r'\s+', ' ', normalized).strip()
-
-    # Aplicar aliases de Dacsa (antes de lowercase)
-    dacsa_aliases = {
-        'dacsa s.a.': 'dacsa group',
-        'dacsa sa': 'dacsa group',
-        'grupo dacsa': 'dacsa group',
-        'dacsa': 'dacsa group',
-    }
-
-    normalized_lower = normalized.lower()
-    if normalized_lower in dacsa_aliases:
-        return dacsa_aliases[normalized_lower]
-
-    # Lowercase final (v1.5.0 normalization)
-    return normalized.lower()
-
-
-# ============================================================================
-# 6.5. WHITELIST VALIDATION AND NORMALIZATION (v1.5.0)
-# ============================================================================
-
-def validate_and_normalize_entity(entity_name: str, entity_type: str) -> tuple[bool, str]:
-    """
-    Valida una entidad contra la whitelist YAML y retorna versión normalizada.
-
-    CRITICAL: Esta función debe ser llamada ANTES de insertar entidades al grafo
-    para evitar duplicados por case (Rice/rice, LARGO/largo).
-
-    Args:
-        entity_name: Nombre de la entidad extraída
-        entity_type: Tipo de entidad (Product, Variety, Brand, etc.)
-
-    Returns:
-        Tuple (is_valid: bool, normalized_name: str)
-        - is_valid: True si pasa validación (está en whitelist o no hay whitelist para el tipo)
-        - normalized_name: Nombre canónico normalizado
-
-    Examples:
-        >>> validate_and_normalize_entity('RICE', 'Product')
-        (True, 'rice')
-        >>> validate_and_normalize_entity('Japonica', 'Variety')
-        (True, 'japonica')
-        >>> validate_and_normalize_entity('Valencia Mill', 'Facility')
-        (True, 'Valencia')
-        >>> validate_and_normalize_entity('FakeProduct', 'Product')
-        (False, 'fakeproduct')
-
-    Casos Especiales:
-        - FACILITY: Limpia apelativos (Mill, Plant, etc.) → solo localidad
-        - PRODUCT/VARIETY: Normaliza a lowercase y valida contra whitelist
-        - PERSON: Siempre retorna (False, ...) porque está desactivada
-    """
-    # PERSON está desactivada - rechazar siempre
-    if entity_type.lower() == 'person':
-        return False, entity_name.lower()
-
-    # FACILITY: Limpiar apelativos antes de validar
-    if entity_type.lower() == 'facility':
-        cleaned = clean_facility_name(entity_name)
-        if WHITELIST_LOADER_AVAILABLE and loader:
-            return loader.validate_entity(cleaned, 'facility')
-        return True, cleaned
-
-    # Usar whitelist loader si está disponible
-    if WHITELIST_LOADER_AVAILABLE and loader:
-        is_valid, normalized = loader.validate_entity(entity_name, entity_type.lower())
-        return is_valid, normalized
-
-    # Fallback: normalizar manualmente
-    normalized = normalize_entity_name(entity_name, entity_type)
-    return True, normalized
-
-
-def get_entity_canonical_name(entity_name: str, entity_type: str) -> str:
-    """
-    Obtiene el nombre canónico de una entidad (versión de whitelist).
-
-    Esta función DEBE ser usada al insertar entidades en el grafo
-    para garantizar consistencia.
-
-    Args:
-        entity_name: Nombre extraído
-        entity_type: Tipo de entidad
-
-    Returns:
-        Nombre canónico (normalizado y validado)
-
-    Examples:
-        >>> get_entity_canonical_name('RICE', 'Product')
-        'rice'
-        >>> get_entity_canonical_name('Sueca Plant', 'Facility')
-        'Sueca'
-    """
-    is_valid, canonical = validate_and_normalize_entity(entity_name, entity_type)
-    return canonical
-
-
-# ============================================================================
-# 7. FUNCIONES DE DETECCIÓN DE DUPLICADOS
-# ============================================================================
-
-def calculate_entity_similarity(name1: str, name2: str) -> float:
-    """
-    Calcula similitud entre dos nombres de entidades (0.0 a 1.0).
-    
-    Reglas:
-        - Ignora mayúsculas/minúsculas
-        - Ignora guiones, puntos, espacios extras
-        - Calcula ratio de caracteres comunes
-    
-    Args:
-        name1, name2: Nombres a comparar
-    
-    Returns:
-        Float 0.0-1.0 (1.0 = idénticos)
-    
-    Examples:
-        >>> calculate_entity_similarity('Ebro Foods', 'EBRO FOODS')
-        1.0
-        >>> calculate_entity_similarity('ISO 22000', 'ISO-22000')
-        1.0
-    """
-    def clean(s):
-        s = s.lower()
-        s = re.sub(r'[^a-z0-9]', '', s)  # Solo alfanuméricos
-        return s
-    
-    clean1 = clean(name1)
-    clean2 = clean(name2)
-    
-    if not clean1 or not clean2:
-        return 0.0
-    
-    # Identidad exacta
-    if clean1 == clean2:
-        return 1.0
-    
-    # Ratio de caracteres comunes
-    common = sum(1 for c in clean1 if c in clean2)
-    max_len = max(len(clean1), len(clean2))
-    
-    return common / max_len if max_len > 0 else 0.0
-
-
-def are_entities_duplicates(name1: str, name2: str, entity_type: str, threshold: float = 0.85) -> bool:
-    """
-    Determina si dos entidades son duplicados.
-    
-    Args:
-        name1, name2: Nombres a comparar
-        entity_type: Tipo de entidad
-        threshold: Umbral de similitud (0.85 por defecto)
-    
-    Returns:
-        True si son duplicados
-    
-    Examples:
-        >>> are_entities_duplicates('Ebro Foods', 'EBRO FOODS', 'Company')
-        True
-        >>> are_entities_duplicates('Ebro Foods', 'Dacsa Group', 'Company')
-        False
-    """
-    # Normalizar ambos según tipo
-    norm1 = normalize_entity_name(name1, entity_type)
-    norm2 = normalize_entity_name(name2, entity_type)
-    
-    # Comparación exacta tras normalización
-    if norm1 == norm2:
-        return True
-    
-    # Comparación por similitud
-    similarity = calculate_entity_similarity(norm1, norm2)
-    
-    return similarity >= threshold
-
-
-# ============================================================================
-# 8. FUNCIÓN DE VALIDACIÓN ANTI-RUIDO
-# ============================================================================
-
-def should_filter_entity(entity_name: str, entity_type: str = None) -> bool:
-    """
-    Determina si una entidad debe ser filtrada (rechazada).
-
-    Criterios de filtrado:
-        - Nombre en blacklist
-        - Nombre muy corto (< 3 caracteres)
-        - Solo números o porcentajes
-        - Años sueltos (2020-2030)
-        - Valores métricos (%, €/kg, etc.) en vez de nombres de métricas
-        - Unidades de medida (kg, tons, mt, etc.)
-
-    Args:
-        entity_name: Nombre de la entidad
-        entity_type: Tipo de entidad (opcional, para validación específica)
-
-    Returns:
-        True si debe ser filtrada (rechazada)
-
-    Examples:
-        >>> should_filter_entity('market')
-        True
-        >>> should_filter_entity('2024')
-        True
-        >>> should_filter_entity('%')
-        True
-        >>> should_filter_entity('€/kg')
-        True
-        >>> should_filter_entity('production capacity', 'metric')
-        False
-    """
-    name_lower = entity_name.lower().strip()
-
-    # Blacklist directa
-    if name_lower in ENTITY_BLACKLIST:
-        return True
-
-    # Nombre muy corto
-    if len(name_lower) < 3:
-        return True
-
-    # Solo números
-    if entity_name.strip().isdigit():
-        return True
-
-    # Porcentajes y símbolos monetarios (CRÍTICO para métricas)
-    if '%' in entity_name:
-        return True
-    if any(symbol in entity_name for symbol in ['€', '$', '£', '¥']):
-        return True
-
-    # Unidades de medida (kg, tons, mt, l, ml, etc.)
-    unit_patterns = [
-        r'\b(kg|kilogram|kilograms)\b',
-        r'\b(ton|tons|tonnes|mt)\b',
-        r'\b(liter|liters|litres|l)\b',
-        r'\b(gram|grams|g)\b',
-        r'\b(hectare|hectares|ha)\b',
-        r'\b(meter|meters|metre|metres|m)\b',
-        r'\b(€/kg|$/kg|€/ton|$/ton)\b',
-        r'\b(percent|percentage)\b',
-    ]
-    for pattern in unit_patterns:
-        if re.search(pattern, name_lower):
-            return True
-
-    # Años (2020-2030)
-    if re.match(r'^20[0-3]\d$', entity_name.strip()):
-        return True
-
-    # Cantidades con símbolos o números
-    if re.match(r'^[$€£¥]\d+', entity_name.strip()):
-        return True
-    if re.match(r'^\d+[\d,\.]*\s*(kg|ton|tons|mt|€|$)', name_lower):
-        return True
-
-    # CRÍTICO para METRICS: rechazar si contiene números (las métricas son NOMBRES, no valores)
-    if entity_type and entity_type.lower() == 'metric':
-        # Métricas NO deben contener números
-        if re.search(r'\d', entity_name):
-            return True
-        # Métricas NO deben ser solo símbolos
-        if entity_name in ['%', '€', '$', '£']:
-            return True
-
-    return False
-
-
-# ============================================================================
-# 9. DEFINICIÓN DE TIPOS DE ENTIDAD (10 tipos - NO variables)
-# ============================================================================
-
-DACSA_ENTITY_TYPES = """
-### Entity Types for Dacsa Group (Rice and Agribusiness Sector)
-
-**CRITICAL: ALL entities MUST be extracted in ENGLISH.**
-
-═══════════════════════════════════════════════════════════════════════════
-
-## 1. COMPANY
-Named business entities (companies, corporations).
-Examples: Dacsa Group, Ebro Foods
-
-## 2. BRAND
-Commercial brand names.
-Examples: La Fallera, Nomen
-
-## 3. PRODUCT (6 base commodities ONLY)
-**STRICT WHITELIST:** Rice, Maize, Wheat, Rye, Barley, Pulses
-
-Extract ONLY if the text mentions a generic product without a specific variety.
-If a Variety is extracted, the corresponding Product is AUTO-EXTRACTED.
-
-## 4. VARIETY (65 industrial specifications)
-**MAIZE varieties (15):**
-Brewing Grits, Flaking Grits, Polenta Grits, Hominy Grits,
-Maize Native Flour, Maize Precooked Flour, Maize Stabilized Flour,
-Maize Heat-treated Flour, Maize Degerminated Flour, Masa Flour,
-Maize Germ Raw, Maize Germ Toasted, Maize Bran, Maize Fiber, Maize Semolina
-
-**RICE varieties (15):**
-Japonica, Indica, Parboiled Rice, Brown Rice, Broken Rice,
-Rice Flour Fine, Rice Brown Flour, Rice Precooked Flour,
-Rice Gelatinized Flour, Pre-gelatinized Rice, Rice Semolina,
-Rice Starch Native, Rice Starch Modified, Rice Protein Concentrate,
-Rice Flour Baby Food Grade
-
-**WHEAT/RYE/BARLEY varieties (8):**
-Wheat Soft Flour, Wheat Durum Flour, Wheat Semolina,
-Wheat Bran, Wheat Germ, Wheat Whole Grain Flour,
-Rye Flour, Barley Pearled
-
-**PULSES varieties (10):**
-Chickpea Flour, Red Lentil Flour, Green Lentil Flour,
-Yellow Pea Flour, Green Pea Flour, Faba Bean Flour,
-Pea Protein Isolate, Pulse Starch, Pulse Fiber, Toasted Pulse Flour
-
-**RULE:** When a Variety is extracted → also extract its Product + create relationship.
-
-## 5. FACILITY
-Named or specifically located industrial installations.
-Examples: Sueca Plant, Valencia Mill
-
-## 6. PERSON [DISABLED - v1.5.0 Whitelist Refactor]
-**ENTITY TYPE DISABLED** - Do not extract person entities
-Previous definition: Named individuals (NAME ONLY, no role in entity_name)
-**Note:** This entity type has been disabled to reduce noise in the knowledge graph
-
-## 7. TECHNOLOGY
-Industrial processing technologies. Examples from keywords:
-Optical Sorting, Color Sorter, Metal Detector, Infrared Dryer,
-Parboiling System, Milling System, Packaging Line, Automation System,
-Quality Control System, Conveyor System, Storage Silo, Weighing System
-
-## 8. METRIC (20 KPIs ONLY)
-**STRICT WHITELIST (lowercase):**
-production capacity, production volume, processing capacity, storage capacity,
-yield rate, moisture content, protein content, broken grain rate,
-revenue, ebitda, operating margin, market share, sales volume,
-unit price, energy consumption, water consumption, waste reduction,
-delivery time, inventory turnover, supplier lead time
-
-**CRITICAL RULES:**
-- Extract ONLY the metric NAME (e.g., "unit price", "ebitda")
-- NEVER extract VALUES: ❌ "50%", "€5/kg", "1000 tons"
-- NEVER extract UNITS: ❌ "%", "€/kg", "kg", "tons"
-- NEVER extract NUMBERS: ❌ "5", "100", "2024"
-- If text says "EBITDA increased 15%" → extract ONLY "ebitda", NOT "15%"
-- If text says "Unit price: €5/kg" → extract ONLY "unit price", NOT "€5/kg"
-
-**Examples:**
-✅ Correct: "revenue", "production capacity", "ebitda"
-❌ Wrong: "50%", "€5/kg", "1000 tons", "15%"
-
-## 9. PROCESS (17 processes ONLY)
-**STRICT WHITELIST:**
-Hulling, Milling, Parboiling, Drying, Cleaning, Sorting, Grinding,
-Sieving, Blending, Fortification, Coating, Packaging, Palletizing,
-Loading, Quality Testing, Metal Detection, Visual Inspection
-
-## 10. MARKET
-Distribution channel + country combined.
-**MANDATORY FORMAT:** "ChannelName CountryName"
-
-**Valid channels:** HORECA, Retail, Foodservice, Industrial, Export
-
-**Examples:**
-- ✅ "HORECA Spain"
-- ✅ "Retail Germany"
-- ✅ "Foodservice France"
-- ❌ "HORECA" (channel alone)
-- ❌ "Spain" (country alone)
-
-═══════════════════════════════════════════════════════════════════════════
-
-### PROHIBITED ENTITIES (NEVER extract):
-- Generic concepts: market, price, trend, growth, production, consumption
-- Numeric values: years (2024), percentages (15%), amounts ($100)
-- Vague terms: analysis, data, report, study, system, model
-- Non-business commodities: cotton, oats
-- Short acronyms: FA, CV, DW
-"""
-
-# ============================================================================
-# 10. PROMPTS (FORMATO OFICIAL HKUDS/LightRAG)
-# ============================================================================
-
-PROMPTS = {}
-
-# Delimitadores oficiales
+# All delimiters must be formatted as "<|UPPER_CASE_STRING|>"
 PROMPTS["DEFAULT_TUPLE_DELIMITER"] = "<|#|>"
-PROMPTS["DEFAULT_RECORD_DELIMITER"] = "##\n"
 PROMPTS["DEFAULT_COMPLETION_DELIMITER"] = "<|COMPLETE|>"
-PROMPTS["entity_extraction_func"] = None
 
-# ----------------------------------------------------------------------------
-# SYSTEM PROMPT
-# ----------------------------------------------------------------------------
+PROMPTS["entity_extraction_system_prompt"] = """---Role---
+You are a Knowledge Graph Specialist responsible for extracting entities and relationships from the input text.
 
-PROMPTS['entity_extraction_system_prompt'] = """
-You are a specialized AI analyst for the rice and agribusiness sector.
-Your task is to extract structured information (entities and relationships) with strict quality filters.
+---Instructions---
+1.  **Entity Extraction & Output:**
+    *   **Identification:** Identify clearly defined and meaningful entities in the input text.
+    *   **Entity Details:** For each identified entity, extract the following information:
+        *   `entity_name`: The name of the entity. If the entity name is case-insensitive, capitalize the first letter of each significant word (title case). Ensure **consistent naming** across the entire extraction process.
+        *   `entity_type`: Categorize the entity using one of the following types: `{entity_types}`. If none of the provided entity types apply, do not add new entity type and classify it as `Other`.
+        *   `entity_description`: Provide a concise yet comprehensive description of the entity's attributes and activities, based *solely* on the information present in the input text.
+    *   **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
+        *   Format: `entity{tuple_delimiter}entity_name{tuple_delimiter}entity_type{tuple_delimiter}entity_description`
 
-**CRITICAL RULES:**
+2.  **Relationship Extraction & Output:**
+    *   **Identification:** Identify direct, clearly stated, and meaningful relationships between previously extracted entities.
+    *   **N-ary Relationship Decomposition:** If a single statement describes a relationship involving more than two entities (an N-ary relationship), decompose it into multiple binary (two-entity) relationship pairs for separate description.
+        *   **Example:** For "Alice, Bob, and Carol collaborated on Project X," extract binary relationships such as "Alice collaborated with Project X," "Bob collaborated with Project X," and "Carol collaborated with Project X," or "Alice collaborated with Bob," based on the most reasonable binary interpretations.
+    *   **Relationship Details:** For each binary relationship, extract the following fields:
+        *   `source_entity`: The name of the source entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
+        *   `target_entity`: The name of the target entity. Ensure **consistent naming** with entity extraction. Capitalize the first letter of each significant word (title case) if the name is case-insensitive.
+        *   `relationship_keywords`: One or more high-level keywords summarizing the overarching nature, concepts, or themes of the relationship. Multiple keywords within this field must be separated by a comma `,`. **DO NOT use `{tuple_delimiter}` for separating multiple keywords within this field.**
+        *   `relationship_description`: A concise explanation of the nature of the relationship between the source and target entities, providing a clear rationale for their connection.
+    *   **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
+        *   Format: `relation{tuple_delimiter}source_entity{tuple_delimiter}target_entity{tuple_delimiter}relationship_keywords{tuple_delimiter}relationship_description`
 
-1. **Language & Case Normalization:**
-   - ALL entity names MUST be in ENGLISH (translate from Spanish if needed)
-   - ALL entity names MUST be in **lowercase** (rice, not Rice or RICE)
-   - Use offline translation dictionaries provided
-   - Descriptions and keywords in English
-   - **CRITICAL**: Normalize ALL entities to lowercase to prevent duplicates
+3.  **Delimiter Usage Protocol:**
+    *   The `{tuple_delimiter}` is a complete, atomic marker and **must not be filled with content**. It serves strictly as a field separator.
+    *   **Incorrect Example:** `entity{tuple_delimiter}Tokyo<|location|>Tokyo is the capital of Japan.`
+    *   **Correct Example:** `entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the capital of Japan.`
 
-2. **Entity Extraction:**
-   - Extract ONLY concrete, specific entities (companies, products, facilities)
-   - NEVER extract generic concepts: "market", "price", "trend", "growth", "cotton"
-   - NEVER extract standalone years (2024, 2025), percentages, monetary values
-   - NEVER extract acronyms < 3 letters unless well-known organizations
-   - Minimum entity name length: 3 characters
-   - **COMPANY NAMES**: Remove ALL legal suffixes (S.A., SA, S.L., SL, Inc., Ltd., LLC, etc.)
-     - ✅ Correct: "4 hijos de rivera" (removed SL)
-     - ❌ Wrong: "4 hijos de rivera sl", "Dacsa S.A."
-   - **FACILITY NAMES**: Extract ONLY the location name, NO descriptors (Mill, Plant, Production, etc.)
-     - ✅ Correct: "valencia" or "sueca"
-     - ❌ Wrong: "Valencia Mill", "Sueca Plant", "Production Facility in Sevilla"
-   - **METRIC NAMES**: Extract ONLY metric names, NEVER values, percentages, or units
-     - ✅ Correct: "unit price", "ebitda", "production capacity"
-     - ❌ Wrong: "%", "€/kg", "50%", "1000 tons"
+4.  **Relationship Direction & Duplication:**
+    *   Treat all relationships as **undirected** unless explicitly stated otherwise. Swapping the source and target entities for an undirected relationship does not constitute a new relationship.
+    *   Avoid outputting duplicate relationships.
 
-3. **Entity Types:**
-{entity_types}
+5.  **Output Order & Prioritization:**
+    *   Output all extracted entities first, followed by all extracted relationships.
+    *   Within the list of relationships, prioritize and output those relationships that are **most significant** to the core meaning of the input text first.
 
-4. **Blacklisted Terms (NEVER extract):**
-   - Generic terms: market, price, trend, growth, production, consumption, demand, supply
-   - Commodities: cotton, oats, sugar, coffee (not in product whitelist)
-   - Analysis terms: analysis, data, report, study, research, forecast
-   - Temporal: year, month, quarter, period, Q1, Q2, Q3, Q4, 2024, 2025
-   - **Units & Symbols**: %, €, $, £, kg, ton, tons, mt, l, ml, g, €/kg, $/kg
-   - **Percentages/Values**: 50%, 15%, 100, 1000, any numeric values
+6.  **Context & Objectivity:**
+    *   Ensure all entity names and descriptions are written in the **third person**.
+    *   Explicitly name the subject or object; **avoid using pronouns** such as `this article`, `this paper`, `our company`, `I`, `you`, and `he/she`.
 
-5. **Product-Variety Hierarchy & STRICT Whitelist Enforcement:**
-   - PRODUCT whitelist: rice, maize, wheat, rye, barley, pulses (ONLY these 6, in lowercase)
-   - VARIETY whitelist: 72 industrial specifications loaded from YAML (see Entity Types)
-   - **CRITICAL**: Extract ONLY products/varieties that exist in whitelist
-   - **CRITICAL**: ALL products/varieties MUST be in lowercase (rice, not Rice)
-   - RULE: When extracting a Variety → also extract its base Product
-   - Create relationship: Variety → Product ("is a specific variety of")
-   - ❌ REJECT any product/variety NOT in whitelist (e.g., "cotton", "sugar", "coffee")
+7.  **Language & Proper Nouns:**
+    *   The entire output (entity names, keywords, and descriptions) must be written in `{language}`.
+    *   Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
 
-6. **Relationship Extraction:**
-   - Extract ONLY meaningful, specific relationships
-   - AVOID generic relationships: "is related to", "is part of", "influences"
-   - Prefer action-oriented relationships: "supplies to", "manufactures", "processes"
-   - Each relationship MUST have concrete evidence in the text
+8.  **Completion Signal:** Output the literal string `{completion_delimiter}` only after all entities and relationships, following all criteria, have been completely extracted and outputted.
 
-7. **CRITICAL ANTI-INFERENCE RULES FOR OWNERSHIP RELATIONSHIPS:**
-
-   🔒 **NEVER infer ownership/subsidiary/acquisition relationships from:**
-   - Companies appearing together in RANKING TABLES or LISTS
-   - Companies appearing in the SAME MARKET SEGMENT
-   - Companies mentioned in COMPARATIVE CONTEXTS
-   - Companies appearing in TOP 10/TOP 5 lists
-
-   ⚠️ **ONLY extract ownership relationships when the text EXPLICITLY states:**
-   - "Company A is a subsidiary of Company B"
-   - "Company B owns Company A"
-   - "Company B acquired Company A"
-   - "Company A is part of Company B Group"
-   - Direct statements with verbs: owns, acquired, purchased, merged with
-
-   ❌ **PROHIBITED INFERENCES:**
-   - ❌ "Ebro Foods and Dacsa appear in top rice companies" → NO ownership relationship
-   - ❌ "Ranking: 1. Ebro Foods, 2. Dacsa, 3. Montsiá" → These are COMPETITORS, NOT subsidiaries
-   - ❌ "ETG operates in same market as Dacsa" → NO ownership relationship
-
-   ✅ **VALID EXTRACTION EXAMPLES:**
-   - ✅ "Herba Ricemills is a subsidiary of Ebro Foods" → Extract: Herba Ricemills → subsidiary of → Ebro Foods
-   - ✅ "ETG Group acquired Industrias Racionero" → Extract: ETG Group → acquired → Industrias Racionero
-   - ✅ "Dacsa Group owns La Fallera brand" → Extract: Dacsa Group → owns → La Fallera
-
-   🎯 **RELATIONSHIP PLAUSIBILITY VALIDATION:**
-   Before extracting ownership/subsidiary/acquired relationships, verify:
-   - Is there an EXPLICIT verb indicating ownership? (owns, subsidiary of, acquired, purchased)
-   - Does the text DIRECTLY connect the two entities with ownership language?
-   - Are the entities in a TABLE/LIST context? → If YES, they are likely COMPETITORS, NOT subsidiaries
-
-8. **Quality Over Quantity:**
-   - Better 5 high-quality entities than 20 generic ones
-   - Maximum 10 entities and 8 relationships per chunk
-   - Each entity must add strategic value
-   - If in doubt, DO NOT extract
-
-9. **OUTPUT FORMAT (OFFICIAL HKUDS/LightRAG):**
-   - Use text-delimited format with <|#|> delimiter (NOT <|>)
-   - Each entity: entity<|#|>entity_name<|#|>entity_type<|#|>entity_description##
-   - Each relationship: relation<|#|>src_id<|#|>tgt_id<|#|>description<|#|>keywords<|#|>weight##
-   - NO parentheses around entities or relations
-   - End with: <|COMPLETE|>
-
-**Validation Checklist Before Output:**
-□ All entity names in ENGLISH (no Spanish)
-□ **ALL entity names in lowercase** (rice, not Rice or RICE)
-□ All Products from whitelist (rice, maize, wheat, rye, barley, pulses) - lowercase only
-□ All Varieties from 72 YAML whitelist specifications - lowercase only
-□ All Metrics from 20 KPIs whitelist
-□ All Processes from 17 operations whitelist
-□ Market format: "Channel Country" (not channel alone or country alone)
-□ **Facility names: location ONLY** (Valencia, not "Valencia Mill")
-□ No blacklisted terms (market, price, trend, etc.)
-□ No numeric values, years, or percentages as entities
-□ Company names normalized (S.A., Inc., Ltd. removed)
-□ **No PERSON entities** (entity type disabled)
+---Examples---
+{examples}
 """
 
-# ----------------------------------------------------------------------------
-# EXAMPLES (NO VARIABLES - v1.1.6 style)
-# ----------------------------------------------------------------------------
+PROMPTS["entity_extraction_user_prompt"] = """---Task---
+Extract entities and relationships from the input text in Data to be Processed below.
 
-PROMPTS['entity_extraction_examples'] = [
-    """Example 1: Variety Hierarchy + Translation ES→EN + Lowercase Normalization
-Input: "Dacsa procesa arroz japónica en la planta de Sueca para el canal HORECA en España. El EBITDA mejoró."
+---Instructions---
+1.  **Strict Adherence to Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system prompt.
+2.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
+3.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant entities and relationships have been extracted and presented.
+4.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
 
-Output:
-entity<|#|>dacsa group<|#|>company<|#|>Leading European agribusiness company specializing in rice processing##
-entity<|#|>rice<|#|>product<|#|>Base rice commodity##
-entity<|#|>japonica<|#|>variety<|#|>Premium round grain rice variety from Japan and Mediterranean regions##
-entity<|#|>sueca<|#|>facility<|#|>Rice processing facility located in Sueca, Spain (facility name cleaned: removed "planta")##
-entity<|#|>horeca spain<|#|>market<|#|>Hotel, restaurant, and catering distribution channel in Spain##
-entity<|#|>ebitda<|#|>metric<|#|>Earnings before interest, taxes, depreciation and amortization##
-relation<|#|>dacsa group<|#|>sueca<|#|>Operates rice processing facility<|#|>operations,facility,ownership<|#|>1.0##
-relation<|#|>japonica<|#|>rice<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>sueca<|#|>japonica<|#|>Processes premium rice variety<|#|>processing,variety,production<|#|>0.9##
-relation<|#|>dacsa group<|#|>horeca spain<|#|>Supplies rice products to distribution channel<|#|>supply,distribution,market<|#|>0.8##
-relation<|#|>dacsa group<|#|>ebitda<|#|>Reports financial metric<|#|>finance,performance,metric<|#|>0.7##
-<|COMPLETE|>
+---Data to be Processed---
+<Entity_types>
+[{entity_types}]
 
-NOTE: All entities in lowercase. "Sueca Plant" → "sueca" (removed "Plant" descriptor).
+<Input Text>
+```
+{input_text}
+```
+
+<Output>
+"""
+
+PROMPTS["entity_continue_extraction_user_prompt"] = """---Task---
+Based on the last extraction task, identify and extract any **missed or incorrectly formatted** entities and relationships from the input text.
+
+---Instructions---
+1.  **Strict Adherence to System Format:** Strictly adhere to all format requirements for entity and relationship lists, including output order, field delimiters, and proper noun handling, as specified in the system instructions.
+2.  **Focus on Corrections/Additions:**
+    *   **Do NOT** re-output entities and relationships that were **correctly and fully** extracted in the last task.
+    *   If an entity or relationship was **missed** in the last task, extract and output it now according to the system format.
+    *   If an entity or relationship was **truncated, had missing fields, or was otherwise incorrectly formatted** in the last task, re-output the *corrected and complete* version in the specified format.
+3.  **Output Format - Entities:** Output a total of 4 fields for each entity, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `entity`.
+4.  **Output Format - Relationships:** Output a total of 5 fields for each relationship, delimited by `{tuple_delimiter}`, on a single line. The first field *must* be the literal string `relation`.
+5.  **Output Content Only:** Output *only* the extracted list of entities and relationships. Do not include any introductory or concluding remarks, explanations, or additional text before or after the list.
+6.  **Completion Signal:** Output `{completion_delimiter}` as the final line after all relevant missing or corrected entities and relationships have been extracted and presented.
+7.  **Output Language:** Ensure the output language is {language}. Proper nouns (e.g., personal names, place names, organization names) must be kept in their original language and not translated.
+
+<Output>
+"""
+
+PROMPTS["entity_extraction_examples"] = [
+    """<Entity_types>
+["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
+
+<Input Text>
+```
+while Alex clenched his jaw, the buzz of frustration dull against the backdrop of Taylor's authoritarian certainty. It was this competitive undercurrent that kept him alert, the sense that his and Jordan's shared commitment to discovery was an unspoken rebellion against Cruz's narrowing vision of control and order.
+
+Then Taylor did something unexpected. They paused beside Jordan and, for a moment, observed the device with something akin to reverence. "If this tech can be understood..." Taylor said, their voice quieter, "It could change the game for us. For all of us."
+
+The underlying dismissal earlier seemed to falter, replaced by a glimpse of reluctant respect for the gravity of what lay in their hands. Jordan looked up, and for a fleeting heartbeat, their eyes locked with Taylor's, a wordless clash of wills softening into an uneasy truce.
+
+It was a small transformation, barely perceptible, but one that Alex noted with an inward nod. They had all been brought here by different paths
+```
+
+<Output>
+entity{tuple_delimiter}Alex{tuple_delimiter}person{tuple_delimiter}Alex is a character who experiences frustration and is observant of the dynamics among other characters.
+entity{tuple_delimiter}Taylor{tuple_delimiter}person{tuple_delimiter}Taylor is portrayed with authoritarian certainty and shows a moment of reverence towards a device, indicating a change in perspective.
+entity{tuple_delimiter}Jordan{tuple_delimiter}person{tuple_delimiter}Jordan shares a commitment to discovery and has a significant interaction with Taylor regarding a device.
+entity{tuple_delimiter}Cruz{tuple_delimiter}person{tuple_delimiter}Cruz is associated with a vision of control and order, influencing the dynamics among other characters.
+entity{tuple_delimiter}The Device{tuple_delimiter}equipment{tuple_delimiter}The Device is central to the story, with potential game-changing implications, and is revered by Taylor.
+relation{tuple_delimiter}Alex{tuple_delimiter}Taylor{tuple_delimiter}power dynamics, observation{tuple_delimiter}Alex observes Taylor's authoritarian behavior and notes changes in Taylor's attitude toward the device.
+relation{tuple_delimiter}Alex{tuple_delimiter}Jordan{tuple_delimiter}shared goals, rebellion{tuple_delimiter}Alex and Jordan share a commitment to discovery, which contrasts with Cruz's vision.)
+relation{tuple_delimiter}Taylor{tuple_delimiter}Jordan{tuple_delimiter}conflict resolution, mutual respect{tuple_delimiter}Taylor and Jordan interact directly regarding the device, leading to a moment of mutual respect and an uneasy truce.
+relation{tuple_delimiter}Jordan{tuple_delimiter}Cruz{tuple_delimiter}ideological conflict, rebellion{tuple_delimiter}Jordan's commitment to discovery is in rebellion against Cruz's vision of control and order.
+relation{tuple_delimiter}Taylor{tuple_delimiter}The Device{tuple_delimiter}reverence, technological significance{tuple_delimiter}Taylor shows reverence towards the device, indicating its importance and potential impact.
+{completion_delimiter}
+
 """,
+    """<Entity_types>
+["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
 
-    """Example 2: Anti-Noise Filtering + Lowercase Enforcement
-Input: "Ebro Foods lidera el mercado español de legumbres con garbanzos y lentejas. El algodón en India crece 15%."
+<Input Text>
+```
+Stock markets faced a sharp downturn today as tech giants saw significant declines, with the global tech index dropping by 3.4% in midday trading. Analysts attribute the selloff to investor concerns over rising interest rates and regulatory uncertainty.
 
-Output:
-entity<|#|>ebro foods<|#|>company<|#|>Leading Spanish food company specializing in rice and pulses##
-entity<|#|>pulses<|#|>product<|#|>Base pulses commodity category##
-entity<|#|>chickpea flour<|#|>variety<|#|>Processed chickpea flour for food manufacturing##
-entity<|#|>red lentil flour<|#|>variety<|#|>Processed red lentil flour for food manufacturing##
-relation<|#|>chickpea flour<|#|>pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>red lentil flour<|#|>pulses<|#|>Is a specific variety of<|#|>variety,product,hierarchy<|#|>1.0##
-relation<|#|>ebro foods<|#|>chickpea flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
-relation<|#|>ebro foods<|#|>red lentil flour<|#|>Produces and markets pulse variety<|#|>production,marketing,product<|#|>0.9##
-<|COMPLETE|>
+Among the hardest hit, nexon technologies saw its stock plummet by 7.8% after reporting lower-than-expected quarterly earnings. In contrast, Omega Energy posted a modest 2.1% gain, driven by rising oil prices.
 
-NOTE: "algodón" (cotton) NOT extracted - not in product whitelist. "15%" NOT extracted - numeric value.
+Meanwhile, commodity markets reflected a mixed sentiment. Gold futures rose by 1.5%, reaching $2,080 per ounce, as investors sought safe-haven assets. Crude oil prices continued their rally, climbing to $87.60 per barrel, supported by supply constraints and strong demand.
+
+Financial experts are closely watching the Federal Reserve's next move, as speculation grows over potential rate hikes. The upcoming policy announcement is expected to influence investor confidence and overall market stability.
+```
+
+<Output>
+entity{tuple_delimiter}Global Tech Index{tuple_delimiter}category{tuple_delimiter}The Global Tech Index tracks the performance of major technology stocks and experienced a 3.4% decline today.
+entity{tuple_delimiter}Nexon Technologies{tuple_delimiter}organization{tuple_delimiter}Nexon Technologies is a tech company that saw its stock decline by 7.8% after disappointing earnings.
+entity{tuple_delimiter}Omega Energy{tuple_delimiter}organization{tuple_delimiter}Omega Energy is an energy company that gained 2.1% in stock value due to rising oil prices.
+entity{tuple_delimiter}Gold Futures{tuple_delimiter}product{tuple_delimiter}Gold futures rose by 1.5%, indicating increased investor interest in safe-haven assets.
+entity{tuple_delimiter}Crude Oil{tuple_delimiter}product{tuple_delimiter}Crude oil prices rose to $87.60 per barrel due to supply constraints and strong demand.
+entity{tuple_delimiter}Market Selloff{tuple_delimiter}category{tuple_delimiter}Market selloff refers to the significant decline in stock values due to investor concerns over interest rates and regulations.
+entity{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}category{tuple_delimiter}The Federal Reserve's upcoming policy announcement is expected to impact investor confidence and market stability.
+entity{tuple_delimiter}3.4% Decline{tuple_delimiter}category{tuple_delimiter}The Global Tech Index experienced a 3.4% decline in midday trading.
+relation{tuple_delimiter}Global Tech Index{tuple_delimiter}Market Selloff{tuple_delimiter}market performance, investor sentiment{tuple_delimiter}The decline in the Global Tech Index is part of the broader market selloff driven by investor concerns.
+relation{tuple_delimiter}Nexon Technologies{tuple_delimiter}Global Tech Index{tuple_delimiter}company impact, index movement{tuple_delimiter}Nexon Technologies' stock decline contributed to the overall drop in the Global Tech Index.
+relation{tuple_delimiter}Gold Futures{tuple_delimiter}Market Selloff{tuple_delimiter}market reaction, safe-haven investment{tuple_delimiter}Gold prices rose as investors sought safe-haven assets during the market selloff.
+relation{tuple_delimiter}Federal Reserve Policy Announcement{tuple_delimiter}Market Selloff{tuple_delimiter}interest rate impact, financial regulation{tuple_delimiter}Speculation over Federal Reserve policy changes contributed to market volatility and investor selloff.
+{completion_delimiter}
+
 """,
+    """<Entity_types>
+["Person","Creature","Organization","Location","Event","Concept","Method","Content","Data","Artifact","NaturalObject"]
 
-    """Example 3: ANTI-INFERENCE - Ranking Tables + Lowercase
-Input: "Top 5 empresas arroceras españolas 2024: 1. Ebro Foods (Herba Ricemills), 2. Dacsa Group, 3. Arrocerías Pons, 4. Coop. Montsiá, 5. SOS Grupo."
+<Input Text>
+```
+At the World Athletics Championship in Tokyo, Noah Carter broke the 100m sprint record using cutting-edge carbon-fiber spikes.
+```
 
-Output:
-entity<|#|>ebro foods<|#|>company<|#|>Leading Spanish rice company, operates Herba Ricemills##
-entity<|#|>herba ricemills<|#|>company<|#|>Rice processing company, subsidiary of Ebro Foods##
-entity<|#|>dacsa group<|#|>company<|#|>Major Spanish rice processing company##
-entity<|#|>arrocerías pons<|#|>company<|#|>Spanish rice company##
-entity<|#|>coop. montsiá<|#|>company<|#|>Spanish rice cooperative##
-entity<|#|>sos grupo<|#|>company<|#|>Spanish food company with rice operations##
-relation<|#|>herba ricemills<|#|>ebro foods<|#|>Is a subsidiary of (explicitly stated in parentheses)<|#|>ownership,subsidiary,corporate<|#|>1.0##
-relation<|#|>ebro foods<|#|>dacsa group<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
-relation<|#|>ebro foods<|#|>arrocerías pons<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
-relation<|#|>dacsa group<|#|>coop. montsiá<|#|>Competes in Spanish rice market<|#|>competition,market,industry<|#|>0.8##
-<|COMPLETE|>
+<Output>
+entity{tuple_delimiter}World Athletics Championship{tuple_delimiter}event{tuple_delimiter}The World Athletics Championship is a global sports competition featuring top athletes in track and field.
+entity{tuple_delimiter}Tokyo{tuple_delimiter}location{tuple_delimiter}Tokyo is the host city of the World Athletics Championship.
+entity{tuple_delimiter}Noah Carter{tuple_delimiter}person{tuple_delimiter}Noah Carter is a sprinter who set a new record in the 100m sprint at the World Athletics Championship.
+entity{tuple_delimiter}100m Sprint Record{tuple_delimiter}category{tuple_delimiter}The 100m sprint record is a benchmark in athletics, recently broken by Noah Carter.
+entity{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}equipment{tuple_delimiter}Carbon-fiber spikes are advanced sprinting shoes that provide enhanced speed and traction.
+entity{tuple_delimiter}World Athletics Federation{tuple_delimiter}organization{tuple_delimiter}The World Athletics Federation is the governing body overseeing the World Athletics Championship and record validations.
+relation{tuple_delimiter}World Athletics Championship{tuple_delimiter}Tokyo{tuple_delimiter}event location, international competition{tuple_delimiter}The World Athletics Championship is being hosted in Tokyo.
+relation{tuple_delimiter}Noah Carter{tuple_delimiter}100m Sprint Record{tuple_delimiter}athlete achievement, record-breaking{tuple_delimiter}Noah Carter set a new 100m sprint record at the championship.
+relation{tuple_delimiter}Noah Carter{tuple_delimiter}Carbon-Fiber Spikes{tuple_delimiter}athletic equipment, performance boost{tuple_delimiter}Noah Carter used carbon-fiber spikes to enhance performance during the race.
+relation{tuple_delimiter}Noah Carter{tuple_delimiter}World Athletics Championship{tuple_delimiter}athlete participation, competition{tuple_delimiter}Noah Carter is competing at the World Athletics Championship.
+{completion_delimiter}
 
-EXPLANATION: This is a RANKING TABLE. Companies listed together are COMPETITORS, NOT subsidiaries.
-- ❌ DO NOT extract: "ebro foods → owns → dacsa group" (WRONG - they compete)
-- ❌ DO NOT extract: "ebro foods → parent of → arrocerías pons" (WRONG - no ownership stated)
-- ✅ DO extract: "herba ricemills → subsidiary of → ebro foods" (CORRECT - explicitly stated in parentheses)
-- ✅ DO extract: Competition relationships between all companies (they are in same ranking)
-- ✅ All entities in lowercase
 """,
 ]
 
-# ----------------------------------------------------------------------------
-# USER PROMPTS
-# ----------------------------------------------------------------------------
+PROMPTS["summarize_entity_descriptions"] = """---Role---
+You are a Knowledge Graph Specialist, proficient in data curation and synthesis.
 
-PROMPTS['entity_extraction_user_prompt'] = """### Context:
-{input_text}
+---Task---
+Your task is to synthesize a list of descriptions of a given entity or relation into a single, comprehensive, and cohesive summary.
 
-### Task:
-Extract entities and relationships following the rules above.
-Output must end with <|COMPLETE|>
-"""
+---Instructions---
+1. Input Format: The description list is provided in JSON format. Each JSON object (representing a single description) appears on a new line within the `Description List` section.
+2. Output Format: The merged description will be returned as plain text, presented in multiple paragraphs, without any additional formatting or extraneous comments before or after the summary.
+3. Comprehensiveness: The summary must integrate all key information from *every* provided description. Do not omit any important facts or details.
+4. Context: Ensure the summary is written from an objective, third-person perspective; explicitly mention the name of the entity or relation for full clarity and context.
+5. Context & Objectivity:
+  - Write the summary from an objective, third-person perspective.
+  - Explicitly mention the full name of the entity or relation at the beginning of the summary to ensure immediate clarity and context.
+6. Conflict Handling:
+  - In cases of conflicting or inconsistent descriptions, first determine if these conflicts arise from multiple, distinct entities or relationships that share the same name.
+  - If distinct entities/relations are identified, summarize each one *separately* within the overall output.
+  - If conflicts within a single entity/relation (e.g., historical discrepancies) exist, attempt to reconcile them or present both viewpoints with noted uncertainty.
+7. Length Constraint:The summary's total length must not exceed {summary_length} tokens, while still maintaining depth and completeness.
+8. Language: The entire output must be written in {language}. Proper nouns (e.g., personal names, place names, organization names) may in their original language if proper translation is not available.
+  - The entire output must be written in {language}.
+  - Proper nouns (e.g., personal names, place names, organization names) should be retained in their original language if a proper, widely accepted translation is not available or would cause ambiguity.
 
-PROMPTS['entity_continue_extraction_user_prompt'] = """Check for any missing entities or relationships in the following text:
-{input_text}
+---Input---
+{description_type} Name: {description_name}
 
-<|COMPLETE|>
-"""
+Description List:
 
-# ----------------------------------------------------------------------------
-# OTHER PROMPTS (unchanged from v1.1.6)
-# ----------------------------------------------------------------------------
-
-PROMPTS['summarize_entity_descriptions'] = """Summarize the following entity descriptions into a single, concise description:
+```
 {description_list}
+```
+
+---Output---
 """
 
-PROMPTS['rag_response'] = """Based on the provided context data, answer the user's query in Spanish with technical precision.
-
-Context Data:
-{content_data}
-
-User Query:
-{user_prompt}
-
-Answer (in Spanish):
-"""
-
-PROMPTS['keywords_extraction'] = """Extract 3-7 keywords from the following text:
-{input_text}
-"""
-
-PROMPTS['naive_rag_response'] = """Context:
-{content_data}
-
-Query:
-{user_prompt}
-
-Answer:
-"""
-
-# ============================================================================
-# 11. INYECCIÓN DE ENTITY TYPES EN SYSTEM PROMPT
-# ============================================================================
-
-PROMPTS['entity_extraction_system_prompt'] = PROMPTS['entity_extraction_system_prompt'].format(
-    entity_types=DACSA_ENTITY_TYPES
+PROMPTS["fail_response"] = (
+    "Sorry, I'm not able to provide an answer to that question.[no-context]"
 )
 
-# ============================================================================
-# 12. VALIDACIÓN FINAL
-# ============================================================================
+PROMPTS["rag_response"] = """---Role---
 
-print("="*80)
-print("✅ LIGHTRAG CUSTOM PROMPTS v1.5.0 LOADED SUCCESSFULLY")
-print("="*80)
-print("🆕 CAMBIOS v1.5.0 (WHITELIST REFACTOR):")
-print("   - Whitelists externalizadas a archivos YAML")
-print("   - Normalización automática case-insensitive")
-print("   - Soporte para patrones regex avanzados")
-print("   - PERSON entity DESACTIVADA (reduce ruido)")
-print("   - Gestión centralizada vía whitelist_loader.py")
-print("")
-print("🔒 FEATURES v1.1.7 (ANTI-INFERENCE PATCH):")
-print("   - Reglas explícitas ANTI-INFERENCIA para ownership/subsidiary")
-print("   - Manejo especial tablas de rankings (competidores, NO subsidiarias)")
-print("   - Validación plausibilidad relaciones críticas")
-print("   - Ejemplo negativo: tabla de rankings → NO ownership")
-print("")
-print("📋 FEATURES CORE:")
-print("   - 56 variety translations + 8 product translations")
-print("   - Regex normalization by entity type")
-print("   - Duplicate detection (similarity-based)")
-print("   - Whitelist validation (6 products, 65 varieties, 20 metrics, 17 processes)")
-print("   - Aggressive blacklist anti-noise filter")
-print("   - 9 entity types (PERSON disabled)")
-print("   - Compatible with HKUDS/LightRAG official format")
-print("   - NO invented variables (v1.1.6 style examples)")
-print("="*80)
+You are an expert AI assistant specializing in synthesizing information from a provided knowledge base. Your primary function is to answer user queries accurately by ONLY using the information within the provided **Context**.
+
+---Goal---
+
+Generate a comprehensive, well-structured answer to the user query.
+The answer must integrate relevant facts from the Knowledge Graph and Document Chunks found in the **Context**.
+Consider the conversation history if provided to maintain conversational flow and avoid repeating information.
+
+---Instructions---
+
+1. Step-by-Step Instruction:
+  - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
+  - Scrutinize both `Knowledge Graph Data` and `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
+  - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
+  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
+  - Generate a references section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Do not generate anything after the reference section.
+
+2. Content & Grounding:
+  - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer any information not explicitly stated.
+  - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
+
+3. Formatting & Language:
+  - The response MUST be in the same language as the user query.
+  - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
+  - The response should be presented in {response_type}.
+
+4. References Section Format:
+  - The References section should be under heading: `### References`
+  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
+  - The Document Title in the citation must retain its original language.
+  - Output each citation on an individual line
+  - Provide maximum of 5 most relevant citations.
+  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+
+5. Reference Section Example:
+```
+### References
+
+- [1] Document Title One
+- [2] Document Title Two
+- [3] Document Title Three
+```
+
+6. Additional Instructions: {user_prompt}
+
+
+---Context---
+
+{context_data}
+"""
+
+PROMPTS["naive_rag_response"] = """---Role---
+
+You are an expert AI assistant specializing in synthesizing information from a provided knowledge base. Your primary function is to answer user queries accurately by ONLY using the information within the provided **Context**.
+
+---Goal---
+
+Generate a comprehensive, well-structured answer to the user query.
+The answer must integrate relevant facts from the Document Chunks found in the **Context**.
+Consider the conversation history if provided to maintain conversational flow and avoid repeating information.
+
+---Instructions---
+
+1. Step-by-Step Instruction:
+  - Carefully determine the user's query intent in the context of the conversation history to fully understand the user's information need.
+  - Scrutinize `Document Chunks` in the **Context**. Identify and extract all pieces of information that are directly relevant to answering the user query.
+  - Weave the extracted facts into a coherent and logical response. Your own knowledge must ONLY be used to formulate fluent sentences and connect ideas, NOT to introduce any external information.
+  - Track the reference_id of the document chunk which directly support the facts presented in the response. Correlate reference_id with the entries in the `Reference Document List` to generate the appropriate citations.
+  - Generate a **References** section at the end of the response. Each reference document must directly support the facts presented in the response.
+  - Do not generate anything after the reference section.
+
+2. Content & Grounding:
+  - Strictly adhere to the provided context from the **Context**; DO NOT invent, assume, or infer any information not explicitly stated.
+  - If the answer cannot be found in the **Context**, state that you do not have enough information to answer. Do not attempt to guess.
+
+3. Formatting & Language:
+  - The response MUST be in the same language as the user query.
+  - The response MUST utilize Markdown formatting for enhanced clarity and structure (e.g., headings, bold text, bullet points).
+  - The response should be presented in {response_type}.
+
+4. References Section Format:
+  - The References section should be under heading: `### References`
+  - Reference list entries should adhere to the format: `* [n] Document Title`. Do not include a caret (`^`) after opening square bracket (`[`).
+  - The Document Title in the citation must retain its original language.
+  - Output each citation on an individual line
+  - Provide maximum of 5 most relevant citations.
+  - Do not generate footnotes section or any comment, summary, or explanation after the references.
+
+5. Reference Section Example:
+```
+### References
+
+- [1] Document Title One
+- [2] Document Title Two
+- [3] Document Title Three
+```
+
+6. Additional Instructions: {user_prompt}
+
+
+---Context---
+
+{content_data}
+"""
+
+PROMPTS["kg_query_context"] = """
+Knowledge Graph Data (Entity):
+
+```json
+{entities_str}
+```
+
+Knowledge Graph Data (Relationship):
+
+```json
+{relations_str}
+```
+
+Document Chunks (Each entry has a reference_id refer to the `Reference Document List`):
+
+```json
+{text_chunks_str}
+```
+
+Reference Document List (Each entry starts with a [reference_id] that corresponds to entries in the Document Chunks):
+
+```
+{reference_list_str}
+```
+
+"""
+
+PROMPTS["naive_query_context"] = """
+Document Chunks (Each entry has a reference_id refer to the `Reference Document List`):
+
+```json
+{text_chunks_str}
+```
+
+Reference Document List (Each entry starts with a [reference_id] that corresponds to entries in the Document Chunks):
+
+```
+{reference_list_str}
+```
+
+"""
+
+PROMPTS["keywords_extraction"] = """---Role---
+You are an expert keyword extractor, specializing in analyzing user queries for a Retrieval-Augmented Generation (RAG) system. Your purpose is to identify both high-level and low-level keywords in the user's query that will be used for effective document retrieval.
+
+---Goal---
+Given a user query, your task is to extract two distinct types of keywords:
+1. **high_level_keywords**: for overarching concepts or themes, capturing user's core intent, the subject area, or the type of question being asked.
+2. **low_level_keywords**: for specific entities or details, identifying the specific entities, proper nouns, technical jargon, product names, or concrete items.
+
+---Instructions & Constraints---
+1. **Output Format**: Your output MUST be a valid JSON object and nothing else. Do not include any explanatory text, markdown code fences (like ```json), or any other text before or after the JSON. It will be parsed directly by a JSON parser.
+2. **Source of Truth**: All keywords must be explicitly derived from the user query, with both high-level and low-level keyword categories are required to contain content.
+3. **Concise & Meaningful**: Keywords should be concise words or meaningful phrases. Prioritize multi-word phrases when they represent a single concept. For example, from "latest financial report of Apple Inc.", you should extract "latest financial report" and "Apple Inc." rather than "latest", "financial", "report", and "Apple".
+4. **Handle Edge Cases**: For queries that are too simple, vague, or nonsensical (e.g., "hello", "ok", "asdfghjkl"), you must return a JSON object with empty lists for both keyword types.
+5. **Language**: All extracted keywords MUST be in {language}. Proper nouns (e.g., personal names, place names, organization names) should be kept in their original language.
+
+---Examples---
+{examples}
+
+---Real Data---
+User Query: {query}
+
+---Output---
+Output:"""
+
+PROMPTS["keywords_extraction_examples"] = [
+    """Example 1:
+
+Query: "How does international trade influence global economic stability?"
+
+Output:
+{
+  "high_level_keywords": ["International trade", "Global economic stability", "Economic impact"],
+  "low_level_keywords": ["Trade agreements", "Tariffs", "Currency exchange", "Imports", "Exports"]
+}
+
+""",
+    """Example 2:
+
+Query: "What are the environmental consequences of deforestation on biodiversity?"
+
+Output:
+{
+  "high_level_keywords": ["Environmental consequences", "Deforestation", "Biodiversity loss"],
+  "low_level_keywords": ["Species extinction", "Habitat destruction", "Carbon emissions", "Rainforest", "Ecosystem"]
+}
+
+""",
+    """Example 3:
+
+Query: "What is the role of education in reducing poverty?"
+
+Output:
+{
+  "high_level_keywords": ["Education", "Poverty reduction", "Socioeconomic development"],
+  "low_level_keywords": ["School access", "Literacy rates", "Job training", "Income inequality"]
+}
+
+""",
+]
